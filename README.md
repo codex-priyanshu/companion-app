@@ -161,7 +161,7 @@ companion-app/
 - ✅ **JWT Authentication** — 7-day tokens with auto-renewal
 - ✅ **Bcrypt Password Hashing** — 12 rounds, secure hashing
 - ✅ **Rate Limiting** — 5 auth attempts/min per IP
-- ✅ **CORS Whitelist** — Sirf approved origins allowed
+- ✅ **CORS White list** — Sirf approved origins allowed
 - ✅ **Helmet.js** — 30+ HTTP security headers
 - ✅ **XSS Sanitization** — Input sanitization middleware
 - ✅ **Admin Controls** — Freeze, block, delete users
