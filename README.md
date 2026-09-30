@@ -167,11 +167,14 @@ Coffeely Full-Stack Architecture
 
 ## 🔒 Security & Privacy Architecture
 
-- **IDOR Protection**: Strict token ownership verification on wallet balances and payouts (`req.user.id`).
-- **File Upload Hardening**: Multer 10MB limits, with executable file extensions (`.exe`, `.sh`, `.php`) blocked.
-- **Socket Authenticity**: Socket connections validate JWT token signatures before admitting users to rooms.
-- **Brute-Force Guard**: Automatic 15-minute account lockout after 5 consecutive failed login attempts.
-- **Security Headers**: Injected via Helmet (`HSTS`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`).
+- ✅ **OTP Email Verification** — Har naya user email verify kare
+- ✅ **JWT Authentication** — 7-day tokens with auto-renewal
+- ✅ **Bcrypt Password Hashing** — 12 rounds, secure hashing
+- ✅ **Rate Limiting** — 5 auth attempts/min per IP
+- ✅ **CORS White list** — Sirf approved origins allowed
+- ✅ **Helmet.js** — 30+ HTTP security headers
+- ✅ **XSS Sanitization** — Input sanitization middleware
+- ✅ **Admin Controls** — Freeze, block, delete users
 
 ---
 
