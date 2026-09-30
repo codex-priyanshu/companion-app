@@ -1,15 +1,24 @@
 import React, { useState, useEffect } from "react";
 import { PAGES } from "../App";
-import { FiHome, FiSearch, FiMessageCircle, FiBell, FiUser, FiCamera, FiTrash2, FiPlusCircle, FiShield, FiX } from "react-icons/fi";
+import { FiHome, FiSearch, FiMessageCircle, FiBell, FiUser, FiCamera, FiTrash2, FiPlusCircle, FiShield, FiCreditCard, FiHeart, FiMenu, FiPlusSquare, FiLock, FiCrop, FiLogIn, FiUserPlus } from "react-icons/fi";
+import { APP_VERSION_TAG } from "../config/version";
+import VerifiedBadge from "./shared/VerifiedBadge";
+import ImageCropperModal from "./shared/ImageCropperModal";
+
+const API_BASE = process.env.REACT_APP_API_URL || "https://rentgf-and-bf.onrender.com";
+const API = `${API_BASE}/api`;
 
 function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setBoyUser, socket }) {
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const [showPostModal, setShowPostModal] = useState(false);
     const [postFile, setPostFile] = useState(null);
     const [postPreview, setPostPreview] = useState(null);
+    const [rawPostImageSrc, setRawPostImageSrc] = useState(null);
+    const [cropModalData, setCropModalData] = useState(null);
     const [postCaption, setPostCaption] = useState("");
     const [isPosting, setIsPosting] = useState(false);
     const [unreadCount, setUnreadCount] = useState(0);
+    const [unreadNotifsCount, setUnreadNotifsCount] = useState(0);
 
     // Instagram style post destinations & settings
     const [showOnFeed, setShowOnFeed] = useState(true);
@@ -21,19 +30,34 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
     const currentUser = boyUser || girlUser || adminUser;
     const isBoy = boyUser !== null;
     const isAdmin = adminUser !== null;
+    const hasDocument = Boolean(currentUser?.id_proof_url || currentUser?.kyc_status === 'verified' || currentUser?.kyc_status === 'pending');
+    const isProfilePage = page === PAGES.BOY_DASHBOARD || page === PAGES.GIRL_DASHBOARD || page === PAGES.ADMIN_DASHBOARD;
 
     useEffect(() => {
         if (!currentUser) return;
 
         const fetchTotalUnread = async () => {
             try {
-                const res = await fetch(`https://rentgf-and-bf.onrender.com/api/chats/${currentUser.id}`);
+                const token = localStorage.getItem('token');
+                if (!token) return;
+                const headers = { 'Authorization': `Bearer ${token}` };
+
+                // ⚡ Direct high-performance single query
+                const fastRes = await fetch(`${API}/unread-messages-count`, { headers });
+                if (fastRes.ok) {
+                    const data = await fastRes.json();
+                    setUnreadCount(data.count || 0);
+                    return;
+                }
+
+                // Fallback with auth headers
+                const res = await fetch(`${API}/chats/${currentUser.id}`, { headers });
                 if (res.ok) {
                     const users = await res.json();
                     let totalUnread = 0;
 
                     await Promise.all(users.map(async (person) => {
-                        const msgRes = await fetch(`https://rentgf-and-bf.onrender.com/api/messages/${currentUser.id}/${person.id}`);
+                        const msgRes = await fetch(`${API}/messages/${currentUser.id}/${person.id}`, { headers });
                         if (msgRes.ok) {
                             const msgs = await msgRes.json();
                             const unread = msgs.filter(m => String(m.sender_id) === String(person.id) && !m.is_read).length;
@@ -45,7 +69,23 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
             } catch (err) { }
         };
 
+        const fetchTotalUnreadNotifs = async () => {
+            try {
+                const token = localStorage.getItem('token');
+                const res = await fetch(`${API}/notifications/${currentUser.id}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (res.ok) {
+                    const notifs = await res.json();
+                    if (Array.isArray(notifs)) {
+                        setUnreadNotifsCount(notifs.filter(n => !n.is_read).length);
+                    }
+                }
+            } catch (err) { }
+        };
+
         fetchTotalUnread();
+        fetchTotalUnreadNotifs();
 
         if (socket) {
             const handleNewMessage = (data) => {
@@ -60,12 +100,20 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
                 }
             };
 
+            const handleNewNotif = () => {
+                setUnreadNotifsCount((prev) => prev + 1);
+            };
+
             socket.on("receive_message", handleNewMessage);
             socket.on("messages_read_update", handleMessagesRead);
+            socket.on("new_notification", handleNewNotif);
+            socket.on("notification_received", handleNewNotif);
 
             return () => {
                 socket.off("receive_message", handleNewMessage);
                 socket.off("messages_read_update", handleMessagesRead);
+                socket.off("new_notification", handleNewNotif);
+                socket.off("notification_received", handleNewNotif);
             };
         }
     }, [socket, currentUser, page]);
@@ -86,15 +134,50 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
     const handleFileSelect = (e) => {
         const file = e.target.files[0];
         if (file) {
-            setPostFile(file);
-            setPostPreview(URL.createObjectURL(file));
+            const reader = new FileReader();
+            reader.onload = () => {
+                setRawPostImageSrc(reader.result);
+                setCropModalData({
+                    imageSrc: reader.result,
+                    isCircular: false,
+                    allowAspectChange: true,
+                    initialAspect: '1:1',
+                    title: 'Crop & Adjust Photo',
+                    onComplete: ({ file: croppedFile, dataUrl }) => {
+                        setPostFile(croppedFile);
+                        setPostPreview(dataUrl);
+                        setCropModalData(null);
+                    }
+                });
+            };
+            reader.readAsDataURL(file);
+            e.target.value = '';
         }
+    };
+
+    const handleReCrop = () => {
+        const source = rawPostImageSrc || postPreview;
+        if (!source) return;
+        setCropModalData({
+            imageSrc: source,
+            isCircular: false,
+            allowAspectChange: true,
+            initialAspect: '1:1',
+            title: 'Crop & Adjust Photo',
+            onComplete: ({ file: croppedFile, dataUrl }) => {
+                setPostFile(croppedFile);
+                setPostPreview(dataUrl);
+                setCropModalData(null);
+            }
+        });
     };
 
     const closePostModal = () => {
         setShowPostModal(false);
         setPostFile(null);
         setPostPreview(null);
+        setRawPostImageSrc(null);
+        setCropModalData(null);
         setPostCaption("");
         setShowOnFeed(true);
         setShowOnProfile(true);
@@ -117,7 +200,7 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
 
         try {
             const token = localStorage.getItem('token');
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/posts/${currentUser.id}`, {
+            const response = await fetch(`${API}/posts/${currentUser.id}`, {
                 method: "POST",
                 body: formData,
                 headers: { 'Authorization': `Bearer ${token}` }
@@ -138,7 +221,13 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
 
     const activeColor = "text-[#e1306c] drop-shadow-[0_0_8px_rgba(225,48,108,0.5)]";
     const inactiveColor = "text-gray-500 hover:text-gray-300";
-    const isHiddenScreen = page === PAGES.CHAT || page === PAGES.DETAILS;
+    const isHiddenScreen = 
+        page === PAGES.CHAT || 
+        page === PAGES.DETAILS || 
+        page === PAGES.BOY_LOGIN || 
+        page === PAGES.GIRL_LOGIN || 
+        page === PAGES.BOY_REGISTER || 
+        page === PAGES.GIRL_REGISTER;
 
     return (
         <>
@@ -149,9 +238,12 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
                         {/* ─── LEFT: Logo ─── */}
                         <button onClick={() => handleNavClick(PAGES.HOME)} className="flex items-center gap-2.5 shrink-0">
                             <svg className="w-8 h-8 shrink-0 drop-shadow-[0_0_8px_rgba(225,48,108,0.4)]" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                <path d="M49.9999 15L23.157 30.5V61.5L49.9999 77L76.8428 61.5V30.5L49.9999 15Z" stroke="url(#ai-grad2)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-                                <path d="M49.9999 35L36.1436 43V59L49.9999 67L63.8563 59V43L49.9999 35Z" stroke="url(#ai-grad2)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-                                <path d="M23 30.5L50 50M77 30.5L50 50M50 77V50" stroke="url(#ai-grad2)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M22 40H68C68 40 69 68 45 68C21 68 22 40 22 40Z" stroke="url(#ai-grad2)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+                                <path d="M68 45H75C80 45 83 48 83 53C83 58 80 61 75 61H66" stroke="url(#ai-grad2)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+                                <path d="M18 75H72" stroke="url(#ai-grad2)" strokeWidth="6" strokeLinecap="round"/>
+                                <path d="M45 29C40 23 32 30 39 37L45 42L51 37C58 30 50 23 45 29Z" fill="url(#ai-grad2)"/>
+                                <path d="M31 27C30 24 31 21 33 19" stroke="url(#ai-grad2)" strokeWidth="4" strokeLinecap="round"/>
+                                <path d="M59 27C60 24 59 21 57 19" stroke="url(#ai-grad2)" strokeWidth="4" strokeLinecap="round"/>
                                 <defs><linearGradient id="ai-grad2" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse"><stop stopColor="#f9ce3f" /><stop offset="0.5" stopColor="#e1306c" /><stop offset="1" stopColor="#833ab4" /></linearGradient></defs>
                             </svg>
                             <span className="text-lg font-black bg-gradient-to-r from-[#f9ce3f] via-[#e1306c] to-[#833ab4] bg-clip-text text-transparent tracking-wide">Coffeely</span>
@@ -177,8 +269,19 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
                                         <span className="relative"><FiMessageCircle size={20} />{unreadCount > 0 && <span className="absolute -top-1.5 -right-2.5 bg-red-500 text-white text-[9px] font-bold px-1 rounded-full min-w-[15px] text-center leading-[15px]">{unreadCount}</span>}</span>
                                         <span className="text-[9px] mt-0.5 font-semibold">Inbox</span>
                                     </button>
-                                    <button onClick={() => handleNavClick(PAGES.NOTIFICATIONS)} title="Activity" className={`flex flex-col items-center justify-center w-14 h-12 rounded-xl transition-all ${page === PAGES.NOTIFICATIONS ? 'text-[#e1306c] bg-[#e1306c]/10' : 'text-gray-500 hover:text-white hover:bg-white/5'}`}>
-                                        <FiBell size={20} /><span className="text-[9px] mt-0.5 font-semibold">Activity</span>
+                                    {hasDocument && (
+                                        <button onClick={() => handleNavClick(PAGES.WALLET)} title="Wallet" className={`flex flex-col items-center justify-center w-14 h-12 rounded-xl transition-all ${page === PAGES.WALLET ? 'text-[#e1306c] bg-[#e1306c]/10' : 'text-gray-500 hover:text-white hover:bg-white/5'}`}>
+                                            <FiCreditCard size={20} /><span className="text-[9px] mt-0.5 font-semibold">Wallet</span>
+                                        </button>
+                                    )}
+                                    <button onClick={() => handleNavClick(PAGES.NOTIFICATIONS)} title="Activity" className={`relative flex flex-col items-center justify-center w-14 h-12 rounded-xl transition-all ${page === PAGES.NOTIFICATIONS ? 'text-[#e1306c] bg-[#e1306c]/10' : 'text-gray-500 hover:text-white hover:bg-white/5'}`}>
+                                        <span className="relative">
+                                            <FiBell size={20} />
+                                            {unreadNotifsCount > 0 && (
+                                                <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full ring-2 ring-black animate-pulse" />
+                                            )}
+                                        </span>
+                                        <span className="text-[9px] mt-0.5 font-semibold">Activity</span>
                                     </button>
                                 </>
                             )}
@@ -191,6 +294,11 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
                                     {isAdmin && (
                                         <button onClick={() => handleNavClick(PAGES.ADMIN_DASHBOARD)} className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-yellow-500 to-orange-500 text-white text-xs font-bold rounded-lg shadow-md hover:opacity-90 transition shrink-0">
                                             <FiShield size={13} /> Admin
+                                        </button>
+                                    )}
+                                    {hasDocument && (
+                                        <button onClick={() => handleNavClick(PAGES.WALLET)} className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold bg-pink-500/10 border border-pink-500/30 hover:bg-pink-500/20 rounded-full text-pink-300 transition shrink-0 shadow-sm">
+                                            <FiCreditCard size={13} /> Wallet
                                         </button>
                                     )}
                                     <button onClick={() => setShowPostModal(true)} className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold bg-white/5 border border-[#262626] hover:bg-white/10 rounded-full text-white transition shrink-0">
@@ -220,90 +328,169 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
             )}
 
 
-            {!isHiddenScreen && (
+            {/* ─── MOBILE TOP BAR: Instagram Style for Logged In, Guest Header for Visitors ─── */}
+            {!isHiddenScreen && currentUser && (
+                <div className="md:hidden fixed top-0 left-0 right-0 z-40 bg-black/95 backdrop-blur-xl border-b border-[#262626] pt-[env(safe-area-inset-top,0px)] h-[calc(3.5rem+env(safe-area-inset-top,0px))] flex items-center justify-between px-4">
+                    {isProfilePage ? (
+                        <>
+                            {/* Instagram Profile Top Header: Username on Left */}
+                            <div className="flex items-center gap-1.5 min-w-0">
+                                {currentUser.is_private && <FiLock size={14} className="text-gray-400 shrink-0" />}
+                                <h3 className="text-lg font-black text-white tracking-tight truncate max-w-[210px]">
+                                    {currentUser.username ? `@${currentUser.username}` : currentUser.name}
+                                </h3>
+                                {currentUser.kyc_status === 'verified' && (
+                                    <VerifiedBadge size="sm" />
+                                )}
+                            </div>
+
+                            {/* Instagram Profile Top Header: Create Post (+) & Settings Menu (☰) on Right */}
+                            <div className="flex items-center gap-1">
+                                <button
+                                    onClick={() => setShowPostModal(true)}
+                                    className="w-10 h-10 rounded-full hover:bg-white/10 text-white flex items-center justify-center transition active:scale-90"
+                                    title="New Post"
+                                    aria-label="New Post"
+                                >
+                                    <FiPlusSquare size={23} />
+                                </button>
+                                <button
+                                    onClick={() => window.dispatchEvent(new CustomEvent('open-settings'))}
+                                    className="w-10 h-10 rounded-full hover:bg-white/10 text-white flex items-center justify-center transition active:scale-90"
+                                    title="Settings & Menu"
+                                    aria-label="Settings & Menu"
+                                >
+                                    <FiMenu size={25} />
+                                </button>
+                            </div>
+                        </>
+                    ) : (
+                        <>
+                            {/* Instagram Feed Top Header: Coffeely on Left */}
+                            <button onClick={() => handleNavClick(PAGES.HOME)} className="flex items-center gap-2 outline-none">
+                                <h3 className="text-2xl font-black bg-gradient-to-r from-[#f9ce3f] via-[#e1306c] to-[#833ab4] bg-clip-text text-transparent tracking-wider select-none">
+                                    Coffeely
+                                </h3>
+                            </button>
+
+                            {/* Instagram Feed Top Header: Notification (Heart) + DM (Message) on Right */}
+                            <div className="flex items-center gap-1">
+                                {/* Notifications (Instagram-Style Heart Activity) */}
+                                <button
+                                    onClick={() => handleNavClick(PAGES.NOTIFICATIONS)}
+                                    className={`relative p-2.5 rounded-full transition active:scale-90 ${page === PAGES.NOTIFICATIONS ? 'text-[#e1306c]' : 'text-white hover:text-gray-300'}`}
+                                    title="Notifications"
+                                    aria-label="Notifications"
+                                >
+                                    <FiHeart size={24} className={page === PAGES.NOTIFICATIONS ? "fill-[#e1306c] text-[#e1306c]" : ""} />
+                                    {unreadNotifsCount > 0 && (
+                                        <span className="absolute top-2 right-2 w-2.5 h-2.5 bg-red-500 rounded-full ring-2 ring-black animate-pulse" />
+                                    )}
+                                </button>
+
+                                {/* Direct Messages Icon */}
+                                <button
+                                    onClick={() => handleNavClick(PAGES.MESSAGES)}
+                                    className={`relative p-2.5 rounded-full transition active:scale-90 ${page === PAGES.MESSAGES ? 'text-[#e1306c]' : 'text-white hover:text-gray-300'}`}
+                                    title="Direct Messages"
+                                    aria-label="Direct Messages"
+                                >
+                                    <FiMessageCircle size={24} />
+                                    {unreadCount > 0 && (
+                                        <span className="absolute top-1.5 right-1.5 bg-red-500 text-white text-[9px] font-black px-1.5 py-0.2 rounded-full min-w-[16px] h-4 flex items-center justify-center ring-2 ring-black">
+                                            {unreadCount > 9 ? '9+' : unreadCount}
+                                        </span>
+                                    )}
+                                </button>
+                            </div>
+                        </>
+                    )}
+                </div>
+            )}
+
+            {!isHiddenScreen && !currentUser && (
                 <div className="md:hidden fixed top-0 left-0 right-0 z-40 bg-black/95 backdrop-blur border-b border-[#262626] h-14 flex items-center justify-between px-4">
                     <h3 className="text-xl font-black bg-gradient-to-r from-[#f9ce3f] via-[#e1306c] to-[#833ab4] bg-clip-text text-transparent tracking-wider">
-                        RentGF
+                        Coffeely
                     </h3>
 
-                    {currentUser ? (
-                        <button
-                            onClick={() => setShowPostModal(true)}
-                            className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold bg-white/10 border border-[#262626] hover:bg-white/20 rounded-full text-white transition"
-                        >
-                            <FiPlusCircle size={14} /> Post
-                        </button>
-                    ) : (
-                        <button className="text-2xl text-white outline-none" onClick={() => setIsMenuOpen(!isMenuOpen)}>
-                            {isMenuOpen ? "✕" : "☰"}
-                        </button>
-                    )}
+                    <button className="text-2xl text-white outline-none" onClick={() => setIsMenuOpen(!isMenuOpen)}>
+                        {isMenuOpen ? "✕" : "☰"}
+                    </button>
                 </div>
             )}
 
             {isMenuOpen && !isHiddenScreen && !currentUser && (
                 <div className="md:hidden fixed top-14 left-0 w-full bg-[#121212] border-b border-[#262626] py-4 px-6 flex flex-col gap-4 shadow-xl z-40">
                     <button onClick={() => handleNavClick(PAGES.HOME)} className={`text-left ${getLinkStyle(PAGES.HOME)} w-fit`}>Home</button>
+                    <button onClick={() => handleNavClick(PAGES.FIND)} className={`text-left ${getLinkStyle(PAGES.FIND)} w-fit`}>Explore Companions</button>
                     <button onClick={() => handleNavClick(PAGES.ABOUT)} className={`text-left ${getLinkStyle(PAGES.ABOUT)} w-fit`}>About</button>
                     <button onClick={() => handleNavClick(PAGES.HELP)} className={`text-left ${getLinkStyle(PAGES.HELP)} w-fit`}>Help</button>
                     <div className="h-px bg-white/10 w-full my-2"></div>
                     <div className="flex flex-col gap-3">
-                        <button onClick={() => handleNavClick(PAGES.GIRL_LOGIN)} className="px-4 py-2 text-sm border border-[#e1306c] text-[#e1306c] rounded-xl text-center">Join as Girl</button>
-                        <button onClick={() => handleNavClick(PAGES.BOY_LOGIN)} className="px-4 py-2 text-sm bg-gradient-to-r from-[#f9ce3f] via-[#e1306c] to-[#833ab4] text-white rounded-xl text-center">Find Companion</button>
+                        <button onClick={() => handleNavClick(PAGES.BOY_LOGIN)} className="px-4 py-2.5 text-sm bg-gradient-to-r from-[#f9ce3f] via-[#e1306c] to-[#833ab4] text-white font-semibold rounded-xl text-center shadow-lg">Log In</button>
+                        <button onClick={() => handleNavClick(PAGES.BOY_REGISTER)} className="px-4 py-2.5 text-sm border border-white/20 hover:border-white/40 text-white font-semibold rounded-xl text-center bg-white/5">Create Account</button>
+                    </div>
+                    <div className="pt-2 flex items-center justify-between text-[11px] text-gray-500 border-t border-white/5 mt-1">
+                        <span>Coffeely App</span>
+                        <span className="font-mono text-emerald-400 font-semibold">{APP_VERSION_TAG} (Latest)</span>
                     </div>
                 </div>
             )}
 
             {!isHiddenScreen && (
-                <div className="fixed bottom-0 left-0 w-full bg-[#121212]/95 backdrop-blur-xl border-t border-[#262626] z-40 md:hidden pb-2 pt-2">
+                <div className="fixed bottom-0 left-0 w-full bg-[#121212]/95 backdrop-blur-xl border-t border-[#262626] z-40 md:hidden pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] pt-2">
                     <div className="flex justify-around items-center h-14 max-w-md mx-auto px-2">
-                        <button onClick={() => handleNavClick(PAGES.HOME)} className={`flex flex-col items-center justify-center w-10 gap-1 transition-all duration-300 ${page === PAGES.HOME ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
-                            <FiHome size={21} /><span className="text-[9px] font-bold">Home</span>
-                        </button>
-
-                        {currentUser && (
-                            <button onClick={() => handleNavClick(PAGES.FIND)} className={`flex flex-col items-center justify-center w-10 gap-1 transition-all duration-300 ${page === PAGES.FIND ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
-                                <FiSearch size={21} /><span className="text-[9px] font-bold">Explore</span>
-                            </button>
-                        )}
-
-                        {currentUser && (
-                            <button onClick={() => handleNavClick(PAGES.MESSAGES)} className={`relative flex flex-col items-center justify-center w-10 gap-1 transition-all duration-300 ${page === PAGES.MESSAGES ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
-                                <span className="relative">
-                                    <FiMessageCircle size={21} />
-                                    {unreadCount > 0 && (
-                                        <span className="absolute -top-1 -right-2 bg-red-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full animate-bounce shadow-lg">
-                                            {unreadCount}
-                                        </span>
-                                    )}
-                                </span>
-                                <span className="text-[9px] font-bold">Inbox</span>
-                            </button>
-                        )}
-
-                        {currentUser && (
-                            <button onClick={() => handleNavClick(PAGES.NOTIFICATIONS)} className={`relative flex flex-col items-center justify-center w-10 gap-1 transition-all duration-300 ${page === PAGES.NOTIFICATIONS ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
-                                <FiBell size={21} />
-                                <span className="text-[9px] font-bold">Activity</span>
-                            </button>
-                        )}
-
-                        {isAdmin && (
-                            <button
-                                onClick={() => handleNavClick(PAGES.ADMIN_DASHBOARD)}
-                                className="px-2 py-1.5 bg-gradient-to-r from-yellow-500 to-orange-500 text-white font-bold rounded-lg shadow-lg hover:scale-105 transition ml-1 text-xs flex items-center gap-1"
-                            >
-                                <FiShield size={14} /> Admin
-                            </button>
-                        )}
                         {currentUser ? (
-                            <button onClick={() => handleNavClick(currentUser.role === 'girl' ? PAGES.GIRL_DASHBOARD : PAGES.BOY_DASHBOARD)} className={`flex flex-col items-center justify-center w-10 gap-1 transition-all duration-300 ${(page === PAGES.BOY_DASHBOARD || page === PAGES.GIRL_DASHBOARD) ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
-                                <FiUser size={21} /><span className="text-[9px] font-bold">Profile</span>
-                            </button>
+                            <>
+                                <button onClick={() => handleNavClick(PAGES.HOME)} className={`flex flex-col items-center justify-center w-12 gap-1 transition-all duration-300 ${page === PAGES.HOME ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
+                                    <FiHome size={22} /><span className="text-[9px] font-bold">Home</span>
+                                </button>
+
+                                <button onClick={() => handleNavClick(PAGES.FIND)} className={`flex flex-col items-center justify-center w-12 gap-1 transition-all duration-300 ${page === PAGES.FIND ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
+                                    <FiSearch size={22} /><span className="text-[9px] font-bold">Explore</span>
+                                </button>
+
+                                <button onClick={() => setShowPostModal(true)} className="flex flex-col items-center justify-center w-12 gap-1 transition-all duration-300 text-pink-400 hover:text-pink-300">
+                                    <FiPlusCircle size={24} />
+                                    <span className="text-[9px] font-bold">Post</span>
+                                </button>
+
+                                {hasDocument && (
+                                    <button onClick={() => handleNavClick(PAGES.WALLET)} className={`flex flex-col items-center justify-center w-12 gap-1 transition-all duration-300 ${page === PAGES.WALLET ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
+                                        <FiCreditCard size={22} />
+                                        <span className="text-[9px] font-bold">Wallet</span>
+                                    </button>
+                                )}
+
+                                <button onClick={() => handleNavClick(currentUser.role === 'girl' ? PAGES.GIRL_DASHBOARD : PAGES.BOY_DASHBOARD)} className={`flex flex-col items-center justify-center w-12 gap-1 transition-all duration-300 ${(page === PAGES.BOY_DASHBOARD || page === PAGES.GIRL_DASHBOARD) ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
+                                    {currentUser.profile_pic ? (
+                                        <img
+                                            src={currentUser.profile_pic}
+                                            alt=""
+                                            className={`w-6 h-6 rounded-full object-cover transition-all ${(page === PAGES.BOY_DASHBOARD || page === PAGES.GIRL_DASHBOARD) ? "ring-2 ring-[#e1306c] ring-offset-1 ring-offset-black" : "border border-white/20"}`}
+                                        />
+                                    ) : (
+                                        <FiUser size={22} />
+                                    )}
+                                    <span className="text-[9px] font-bold">Profile</span>
+                                </button>
+                            </>
                         ) : (
-                            <button onClick={() => handleNavClick(PAGES.ABOUT)} className={`flex flex-col items-center justify-center w-12 gap-1 transition-all duration-300 ${page === PAGES.ABOUT ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
-                                <FiUser size={21} /><span className="text-[9px] font-bold">About</span>
-                            </button>
+                            <>
+                                <button onClick={() => handleNavClick(PAGES.HOME)} className={`flex flex-col items-center justify-center w-12 gap-1 transition-all duration-300 ${page === PAGES.HOME ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
+                                    <FiHome size={22} /><span className="text-[9px] font-bold">Home</span>
+                                </button>
+                                <button onClick={() => handleNavClick(PAGES.FIND)} className={`flex flex-col items-center justify-center w-12 gap-1 transition-all duration-300 ${page === PAGES.FIND ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
+                                    <FiSearch size={22} /><span className="text-[9px] font-bold">Explore</span>
+                                </button>
+                                <button onClick={() => handleNavClick(PAGES.BOY_LOGIN)} className={`flex flex-col items-center justify-center w-12 gap-1 transition-all duration-300 ${page === PAGES.BOY_LOGIN || page === PAGES.GIRL_LOGIN ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
+                                    <FiLogIn size={22} /><span className="text-[9px] font-bold">Log In</span>
+                                </button>
+                                <button onClick={() => handleNavClick(PAGES.BOY_REGISTER)} className={`flex flex-col items-center justify-center w-12 gap-1 transition-all duration-300 ${page === PAGES.BOY_REGISTER || page === PAGES.GIRL_REGISTER ? activeColor + " scale-110 -translate-y-1" : inactiveColor}`}>
+                                    <FiUserPlus size={22} /><span className="text-[9px] font-bold">Register</span>
+                                </button>
+                            </>
                         )}
                     </div>
                 </div>
@@ -336,9 +523,14 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
                                 <div className="flex flex-col gap-4 animate-fade-in">
                                     <div className="relative">
                                         <img src={postPreview} alt="Preview" className="w-full aspect-square object-cover rounded-xl border border-white/10 shadow-lg" />
-                                        <button onClick={() => { setPostFile(null); setPostPreview(null); }} className="absolute top-3 right-3 bg-black/60 text-white p-2 rounded-full backdrop-blur-md hover:bg-red-500 transition flex items-center gap-1 text-xs">
-                                            <FiTrash2 size={13} /> Remove
-                                        </button>
+                                        <div className="absolute top-3 right-3 flex items-center gap-2">
+                                            <button type="button" onClick={handleReCrop} className="bg-black/60 text-white px-2.5 py-1.5 rounded-full backdrop-blur-md hover:bg-white/20 transition flex items-center gap-1 text-xs">
+                                                <FiCrop size={13} className="text-pink-400" /> Adjust
+                                            </button>
+                                            <button type="button" onClick={() => { setPostFile(null); setPostPreview(null); setRawPostImageSrc(null); }} className="bg-black/60 text-white p-1.5 rounded-full backdrop-blur-md hover:bg-red-500 transition flex items-center gap-1 text-xs">
+                                                <FiTrash2 size={13} />
+                                            </button>
+                                        </div>
                                     </div>
                                     <div className="flex gap-3">
                                         <img src={currentUser?.profile_pic || (isBoy ? "https://cdn-icons-png.flaticon.com/512/3135/3135715.png" : "https://cdn-icons-png.flaticon.com/512/3135/3135768.png")} alt="Profile" className="w-10 h-10 rounded-full object-cover border border-white/10" />
@@ -439,6 +631,18 @@ function Navbar({ page, setPage, girlUser, boyUser, adminUser, setGirlUser, setB
                         </div>
                     </div>
                 </div>
+            )}
+
+            {cropModalData && (
+                <ImageCropperModal
+                    imageSrc={cropModalData.imageSrc}
+                    isCircular={cropModalData.isCircular}
+                    allowAspectChange={cropModalData.allowAspectChange}
+                    initialAspect={cropModalData.initialAspect}
+                    title={cropModalData.title}
+                    onCropComplete={cropModalData.onComplete}
+                    onClose={() => setCropModalData(null)}
+                />
             )}
         </>
     );

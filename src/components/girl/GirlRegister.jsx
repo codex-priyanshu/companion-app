@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { PAGES } from "../../App";
 import { FiCamera } from "react-icons/fi";
+import { getFriendlyErrorMessage } from "../../utils/errorHandler";
 
 const TAG_OPTIONS = ["Coffee Date", "Movie", "Shopping", "Study Partner", "Walk", "Events", "Dinner", "Travel", "Gaming"];
 
@@ -26,8 +27,14 @@ function GirlRegister({ setPage, setGirlUser }) {
         if (step < 3) {
             setStep((s) => s + 1);
         } else {
-            setLoading(true);
             setError("");
+
+            if (typeof navigator !== 'undefined' && !navigator.onLine) {
+                setError("No internet connection. Please check your network to register.");
+                return;
+            }
+
+            setLoading(true);
 
             try {
                 const response = await fetch("https://rentgf-and-bf.onrender.com/api/register", {
@@ -48,17 +55,17 @@ function GirlRegister({ setPage, setGirlUser }) {
                     }),
                 });
 
-                const data = await response.json();
+                const data = await response.json().catch(() => ({}));
 
                 if (response.ok) {
                     alert("Registration Successful! Please login to continue.");
                     setPage(PAGES.GIRL_LOGIN); 
                 } else {
-                    setError(data.error);
+                    setError(getFriendlyErrorMessage(null, data, "Registration failed. Please check your details."));
                 }
             } catch (err) {
                 console.error("Register Error:", err);
-                setError("Server connection failed. Is backend running?");
+                setError(getFriendlyErrorMessage(err, null, "Unable to reach server. Please check your connection."));
             } finally {
                 setLoading(false);
             }

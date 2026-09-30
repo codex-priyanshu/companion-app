@@ -2,11 +2,23 @@ import React, { useState, useEffect, useRef } from "react";
 import { PAGES } from "../../App";
 import { io } from "socket.io-client";
 import InstagramPostModal from "./InstagramPostModal";
+import PaymentModal from "./PaymentModal";
+import ReviewsSection from "./ReviewsSection";
+import KYCUploadPrompt from "./KYCUploadPrompt";
+import VerifiedBadge from "./VerifiedBadge";
+import { ProfileGridSkeleton, MessageListSkeleton } from "./SkeletonLoaders";
 import { FiArrowLeft, FiMapPin, FiMessageCircle, FiStar, FiGrid, FiLock, FiShield, FiX, FiCalendar, FiClock, FiMoreVertical, FiFlag, FiSlash, FiShare2, FiAlertTriangle, FiCheckCircle, FiTrash2, FiVideo, FiPhone, FiHeart } from "react-icons/fi";
 
-const socket = io("https://rentgf-and-bf.onrender.com", {
+// Backend API Base Configuration
+const API_BASE = process.env.REACT_APP_API_URL || "https://rentgf-and-bf.onrender.com";
+const API = `${API_BASE}/api`;
+
+const socket = io(API_BASE, {
     autoConnect: false,
-    transports: ['websocket']
+    transports: ['websocket'],
+    auth: (cb) => {
+        cb({ token: localStorage.getItem('token') });
+    }
 });
 
 const TIME_SLOTS = [
@@ -17,13 +29,19 @@ const TIME_SLOTS = [
     { id: "late_night", label: "Late Night", timeRange: "09:00 PM - 11:00 PM", icon: "✨" }
 ];
 
-function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
+function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl, onUpdateUser }) {
     const [hours, setHours] = useState(2);
     const [posts, setPosts] = useState([]);
     const [expandedPost, setExpandedPost] = useState(null);
     const [showDpModal, setShowDpModal] = useState(false);
+    const [showKycModal, setShowKycModal] = useState(false);
+
+    const hasDocument = Boolean(currentUser?.id_proof_url || currentUser?.kyc_status === 'verified' || currentUser?.kyc_status === 'pending');
+    const showBookingCard = !currentUser || currentUser.id !== profile.id;
 
     const [bookingStatus, setBookingStatus] = useState(null);
+    const [showPaymentModal, setShowPaymentModal] = useState(false);
+    const [pendingBookingData, setPendingBookingData] = useState(null);
     const [reviews, setReviews] = useState([]);
     const [avgRating, setAvgRating] = useState(0);
     const [newReviewText, setNewReviewText] = useState("");
@@ -35,6 +53,8 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
 
     const [isFavorited, setIsFavorited] = useState(false);
     const [favLoading, setFavLoading] = useState(false);
+    const [showGuestAuthModal, setShowGuestAuthModal] = useState(false);
+    const [guestModalReason, setGuestModalReason] = useState("");
 
     // Followers / Following Modal States
     const [showFollowModal, setShowFollowModal] = useState(null); // 'followers' | 'following' | null
@@ -55,7 +75,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
             const headers = {};
             if (token) headers['Authorization'] = `Bearer ${token}`;
 
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/${type === 'followers' ? 'followers-list' : 'following-list'}/${profile.id}`, { headers });
+            const response = await fetch(`${API}/${type === 'followers' ? 'followers-list' : 'following-list'}/${profile.id}`, { headers });
             if (response.ok) {
                 const data = await response.json();
                 setFollowList(data);
@@ -96,7 +116,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
         const token = localStorage.getItem('token');
         if (!token) return;
 
-        fetch(`https://rentgf-and-bf.onrender.com/api/favorites/check/${profile.id}`, {
+        fetch(`${API}/favorites/check/${profile.id}`, {
             headers: { Authorization: `Bearer ${token}` }
         })
         .then(r => r.ok ? r.json() : { isFavorited: false })
@@ -105,11 +125,15 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
     }, [currentUser, profile?.id]);
 
     const handleToggleFavorite = async () => {
-        if (!currentUser) return alert("Please login first to save companions to your favorites!");
+        if (!currentUser) {
+            setGuestModalReason(`Log in to save ${profile.name} to your favorites.`);
+            setShowGuestAuthModal(true);
+            return;
+        }
         setFavLoading(true);
         try {
             const token = localStorage.getItem('token');
-            const res = await fetch("https://rentgf-and-bf.onrender.com/api/favorites/toggle", {
+            const res = await fetch(`${API}/favorites/toggle`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -130,8 +154,8 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
 
     const handleMessageClick = () => {
         if (!currentUser) {
-            alert("Please login first to chat with companions!");
-            setPage(PAGES.BOY_LOGIN);
+            setGuestModalReason(`Sign in to chat live with ${profile.name}.`);
+            setShowGuestAuthModal(true);
             return;
         }
         setPage(PAGES.CHAT);
@@ -139,8 +163,8 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
 
     const handleCallClick = (type) => {
         if (!currentUser) {
-            alert(`Please login first to make ${type} calls!`);
-            setPage(PAGES.BOY_LOGIN);
+            setGuestModalReason(`Sign in to make ${type} calls with ${profile.name}.`);
+            setShowGuestAuthModal(true);
             return;
         }
         const roomId = [currentUser.id, profile.id].sort((a, b) => a - b).join('_');
@@ -149,8 +173,8 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
 
     const handleFollowClick = () => {
         if (!currentUser) {
-            alert("Please login first to follow companions!");
-            setPage(PAGES.BOY_LOGIN);
+            setGuestModalReason(`Sign in to follow ${profile.name} and see their latest updates.`);
+            setShowGuestAuthModal(true);
             return;
         }
         handleFollowToggle();
@@ -175,7 +199,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
     useEffect(() => {
         if (!showBookingModal || !profile?.id || !meetingInfo.date) return;
         setLoadingSlots(true);
-        fetch(`https://rentgf-and-bf.onrender.com/api/bookings/booked-slots/${profile.id}?date=${meetingInfo.date}`)
+        fetch(`${API}/bookings/booked-slots/${profile.id}?date=${meetingInfo.date}`)
             .then(res => res.ok ? res.json() : { bookedSlots: [] })
             .then(data => {
                 setBookedSlots(data.bookedSlots || []);
@@ -276,7 +300,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
         if (!await window.showConfirm("Are you sure you want to delete this photo?")) return;
         try {
             const token = localStorage.getItem("token");
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/posts/${postId}`, { 
+            const response = await fetch(`${API}/posts/${postId}`, { 
                 method: "DELETE",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -303,7 +327,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
         if (!currentUser || !profile || currentUser.id === profile.id) return;
         const token = localStorage.getItem('token');
         if (!token) return;
-        fetch(`https://rentgf-and-bf.onrender.com/api/block-status/${profile.id}`, {
+        fetch(`${API}/block-status/${profile.id}`, {
             headers: { 'Authorization': `Bearer ${token}` }
         })
         .then(r => r.ok ? r.json() : null)
@@ -326,7 +350,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
         const token = localStorage.getItem('token');
         const endpoint = isBlocked ? '/api/unblock' : '/api/block';
         try {
-            const res = await fetch(`https://rentgf-and-bf.onrender.com${endpoint}`, {
+            const res = await fetch(`${API_BASE}${endpoint}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                 body: JSON.stringify({ blocked_id: profile.id })
@@ -351,7 +375,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
         setReportSubmitting(true);
         const token = localStorage.getItem('token');
         try {
-            const res = await fetch('https://rentgf-and-bf.onrender.com/api/report', {
+            const res = await fetch(`${API}/report`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                 body: JSON.stringify({ reported_id: profile.id, reason: reportReason, description: reportDesc })
@@ -375,6 +399,8 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
         setShowMenu(false);
     };
 
+    const [loadingUserData, setLoadingUserData] = useState(true);
+
     useEffect(() => {
         if (!profile) return;
 
@@ -387,6 +413,9 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
             if (parsedData.reviews) setReviews(parsedData.reviews);
             if (parsedData.avgRating !== undefined) setAvgRating(parsedData.avgRating);
             if (parsedData.followStats) setFollowStats(parsedData.followStats);
+            setLoadingUserData(false);
+        } else {
+            setLoadingUserData(true);
         }
 
         const fetchUserData = async () => {
@@ -397,7 +426,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
 
             try {
                 const currentUserId = currentUser ? currentUser.id : '';
-                const statsRes = await fetch(`https://rentgf-and-bf.onrender.com/api/follow-stats/${profile.id}?currentUserId=${currentUserId}`);
+                const statsRes = await fetch(`${API}/follow-stats/${profile.id}?currentUserId=${currentUserId}`);
                 if (statsRes.ok) {
                     fetchedFollowStats = await statsRes.json();
                 }
@@ -411,7 +440,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                     const token = localStorage.getItem("token");
                     const headers = {};
                     if (token) headers["Authorization"] = `Bearer ${token}`;
-                    const postRes = await fetch(`https://rentgf-and-bf.onrender.com/api/posts/${profile.id}`, { headers });
+                    const postRes = await fetch(`${API}/posts/${profile.id}`, { headers });
                     if (postRes.ok) fetchedPosts = await postRes.json();
                 } catch (err) {
                     console.error(err);
@@ -419,7 +448,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
             }
 
             try {
-                const reviewRes = await fetch(`https://rentgf-and-bf.onrender.com/api/reviews/${profile.id}`);
+                const reviewRes = await fetch(`${API}/reviews/${profile.id}`);
                 if (reviewRes.ok) {
                     const data = await reviewRes.json();
                     fetchedReviews = data.reviews;
@@ -433,6 +462,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
             setReviews(fetchedReviews);
             setAvgRating(fetchedAvgRating);
             setFollowStats(fetchedFollowStats);
+            setLoadingUserData(false);
 
             sessionStorage.setItem(cacheKey, JSON.stringify({
                 posts: fetchedPosts,
@@ -454,7 +484,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
         const token = localStorage.getItem('token');
 
         try {
-            const res = await fetch(`https://rentgf-and-bf.onrender.com${endpoint}`, {
+            const res = await fetch(`${API_BASE}${endpoint}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -480,23 +510,43 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
         }
     };
 
-    const handleBookingSubmit = async () => {
+    const handleOpenPaymentCheckout = () => {
         if (!currentUser) return alert("Please login first!");
+        if (!hasDocument) {
+            setShowBookingModal(false);
+            setShowKycModal(true);
+            return;
+        }
         if (!meetingInfo.date) return alert("Please select a date!");
 
-        setBookingStatus('loading');
         const amount = (profile.price || 1000) * hours;
-
-        const boy_id = currentUser.role === 'boy' ? currentUser.id : profile.id;
-        const girl_id = currentUser.role === 'girl' ? currentUser.id : profile.id;
-
         const activeSlotObj = TIME_SLOTS.find(s => s.id === selectedSlot);
         const slotLabel = activeSlotObj ? `${activeSlotObj.label} (${activeSlotObj.timeRange})` : meetingInfo.time;
         const meetingTimeFormatted = activeSlotObj ? activeSlotObj.timeRange.split(' - ')[0] : meetingInfo.time;
 
+        setPendingBookingData({
+            hours,
+            amount,
+            meeting_date: meetingInfo.date,
+            meeting_time: meetingTimeFormatted,
+            time_slot: slotLabel,
+            meeting_location: meetingInfo.location
+        });
+
+        setShowBookingModal(false);
+        setShowPaymentModal(true);
+    };
+
+    const handlePaymentSuccess = async (paymentResult) => {
+        if (!pendingBookingData || !currentUser) return;
+        setBookingStatus('loading');
+
+        const boy_id = currentUser.role === 'boy' ? currentUser.id : profile.id;
+        const girl_id = currentUser.role === 'girl' ? currentUser.id : profile.id;
+
         try {
             const token = localStorage.getItem('token');
-            const response = await fetch('https://rentgf-and-bf.onrender.com/api/bookings', {
+            const response = await fetch(`${API}/bookings`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -505,13 +555,16 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                 body: JSON.stringify({
                     boy_id,
                     girl_id,
-                    hours,
-                    amount,
-                    meeting_date: meetingInfo.date,
-                    meeting_time: meetingTimeFormatted,
-                    time_slot: slotLabel,
-                    meeting_location: meetingInfo.location,
-                    sender_id: currentUser.id
+                    hours: pendingBookingData.hours,
+                    amount: pendingBookingData.amount,
+                    meeting_date: pendingBookingData.meeting_date,
+                    meeting_time: pendingBookingData.meeting_time,
+                    time_slot: pendingBookingData.time_slot,
+                    meeting_location: pendingBookingData.meeting_location,
+                    sender_id: currentUser.id,
+                    payment_id: paymentResult.payment_id,
+                    payment_status: 'escrow_held',
+                    payment_method: paymentResult.payment_method
                 })
             });
 
@@ -520,11 +573,10 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                 socket.emit("send_booking_notification", {
                     receiver_id: profile.id,
                     sender_name: currentUser.name,
-                    hours: hours,
-                    amount: amount
+                    hours: pendingBookingData.hours,
+                    amount: pendingBookingData.amount
                 });
-                setShowBookingModal(false);
-                setTimeout(() => setBookingStatus(null), 3000);
+                setTimeout(() => setBookingStatus(null), 3500);
             } else {
                 const errData = await response.json().catch(() => ({}));
                 setBookingStatus(null);
@@ -536,13 +588,17 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
         }
     };
 
+    const handleBookingSubmit = () => {
+        handleOpenPaymentCheckout();
+    };
+
 
     const submitReview = async () => {
         if (!newReviewText.trim() || !currentUser) return;
 
         try {
             const token = localStorage.getItem('token');
-            const response = await fetch('https://rentgf-and-bf.onrender.com/api/reviews', {
+            const response = await fetch(`${API}/reviews`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -558,7 +614,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
             if (response.ok) {
                 setNewReviewText("");
                 setNewRating(5);
-                const reviewRes = await fetch(`https://rentgf-and-bf.onrender.com/api/reviews/${profile.id}`);
+                const reviewRes = await fetch(`${API}/reviews/${profile.id}`);
                 const data = await reviewRes.json();
                 setReviews(data.reviews);
                 setAvgRating(data.avgRating);
@@ -585,7 +641,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
 
             {/* ── TOP NAV BAR ── */}
             <div className="sticky top-0 bg-[#0D0D1A]/85 backdrop-blur-md z-30 border-b border-white/5">
-                <div className="max-w-4xl mx-auto px-4 h-14 flex items-center justify-between">
+                <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
                     <button
                         onClick={() => setPage(PAGES.FIND)}
                         className="w-9 h-9 flex items-center justify-center rounded-full bg-white/5 hover:bg-white/10 text-white transition"
@@ -645,7 +701,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
             </div>
 
             {/* ── INSTAGRAM LAYOUT HEADER ── */}
-            <div className="max-w-4xl mx-auto px-4 pt-6 md:pt-10 pb-6 border-b border-white/5 mb-6">
+            <div className="max-w-5xl mx-auto px-4 pt-6 md:pt-10 pb-6 border-b border-white/5 mb-6">
                 {/* Mobile: Avatar & Stats side-by-side. Desktop: Left avatar, right content */}
                 <div className="flex items-center md:items-start gap-6 md:gap-20 mb-4 md:mb-6">
                     {/* Avatar */}
@@ -694,7 +750,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                             <h1 className="text-2xl font-bold text-white flex items-center gap-2">
                                 {profile.name}
                                 {profile.kyc_status === 'verified' && (
-                                    <span className="text-blue-400" title="Verified Companion">✔</span>
+                                    <VerifiedBadge size="sm" />
                                 )}
                             </h1>
                             <span className="text-xs text-gray-500 mt-0.5 font-semibold block">
@@ -772,44 +828,44 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                         </div>
 
                         {/* Buttons below the bio on Desktop */}
-                        <div className="flex gap-2 pt-2">
+                        <div className="flex items-center gap-2 pt-2 flex-wrap">
                             {(!currentUser || currentUser.id !== profile.id) && (
                                 <button
                                     onClick={handleFollowClick}
                                     disabled={followLoading}
-                                    className={`px-6 py-2 rounded-lg font-bold text-xs transition min-w-[120px] ${followStats.isFollowing
+                                    className={`px-6 py-2 rounded-xl font-bold text-xs transition min-w-[110px] active:scale-95 shadow-sm ${followStats.isFollowing
                                         ? 'bg-white/10 text-white hover:bg-white/15 border border-white/10'
-                                        : `bg-gradient-to-r ${accentGrad} text-white hover:opacity-90 shadow-md`}`}
+                                        : `bg-gradient-to-r ${accentGrad} text-white hover:opacity-90`}`}
                                 >
                                     {followLoading ? '...' : followStats.isFollowing ? 'Following' : 'Follow'}
                                 </button>
                             )}
                             <button
                                 onClick={handleMessageClick}
-                                className="px-5 py-2 bg-[#262626] hover:bg-[#363636] border border-white/5 text-white rounded-lg font-bold text-xs transition flex items-center justify-center gap-1.5"
+                                className="px-5 py-2 bg-[#262626] hover:bg-[#363636] border border-white/10 text-white rounded-xl font-bold text-xs transition flex items-center justify-center gap-1.5 active:scale-95 shadow-sm"
                             >
-                                Message
+                                <FiMessageCircle size={14} /> Message
                             </button>
                             {(!currentUser || currentUser.id !== profile.id) && (
                                 <>
                                     <button
                                         onClick={() => handleCallClick('video')}
-                                        className="w-9 h-9 bg-[#0095f6]/10 hover:bg-[#0095f6]/20 border border-[#0095f6]/30 text-[#0095f6] rounded-lg font-bold transition flex items-center justify-center"
+                                        className="px-3.5 py-2 bg-[#0095f6]/10 hover:bg-[#0095f6]/20 border border-[#0095f6]/30 text-[#0095f6] rounded-xl font-bold text-xs transition flex items-center gap-1.5 active:scale-95"
                                         title="Video Call"
                                     >
-                                        <FiVideo size={16} />
+                                        <FiVideo size={14} /> Video Call
                                     </button>
                                     <button
                                         onClick={() => handleCallClick('audio')}
-                                        className="w-9 h-9 bg-[#0095f6]/10 hover:bg-[#0095f6]/20 border border-[#0095f6]/30 text-[#0095f6] rounded-lg font-bold transition flex items-center justify-center"
+                                        className="px-3.5 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 rounded-xl font-bold text-xs transition flex items-center gap-1.5 active:scale-95"
                                         title="Voice Call"
                                     >
-                                        <FiPhone size={16} />
+                                        <FiPhone size={14} /> Voice Call
                                     </button>
                                     <button
                                         onClick={handleToggleFavorite}
                                         disabled={favLoading}
-                                        className={`w-9 h-9 border rounded-lg font-bold transition flex items-center justify-center ${
+                                        className={`w-9 h-9 border rounded-xl font-bold transition flex items-center justify-center active:scale-95 ${
                                             isFavorited
                                                 ? 'bg-red-500/20 border-red-500/40 text-red-400 shadow-md shadow-red-500/10'
                                                 : 'bg-white/5 hover:bg-white/10 border-white/10 text-gray-400 hover:text-white'
@@ -831,7 +887,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                         <h1 className="text-lg font-bold text-white flex items-center gap-2">
                             {profile.name}
                             {profile.kyc_status === 'verified' && (
-                                <span className="text-blue-400" title="Verified Companion">✔</span>
+                                <VerifiedBadge size="sm" />
                             )}
                         </h1>
                         <span className="text-[11px] text-gray-500 font-semibold block">
@@ -886,36 +942,37 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                     </div>
 
                     {/* Action buttons at the bottom on Mobile */}
-                    <div className="flex gap-2 pt-2">
+                    <div className="flex items-center gap-2 pt-3 pb-1">
                         {(!currentUser || currentUser.id !== profile.id) && (
                             <button
                                 onClick={handleFollowClick}
                                 disabled={followLoading}
-                                className={`flex-1 py-2 rounded-lg font-bold text-xs transition ${followStats.isFollowing
+                                className={`flex-1 py-2.5 rounded-xl font-bold text-xs transition active:scale-95 shadow-sm ${followStats.isFollowing
                                     ? 'bg-white/10 text-white hover:bg-white/15 border border-white/10'
-                                    : `bg-gradient-to-r ${accentGrad} text-white hover:opacity-90 shadow-md`}`}
+                                    : `bg-gradient-to-r ${accentGrad} text-white hover:opacity-90`}`}
                             >
                                 {followLoading ? '...' : followStats.isFollowing ? 'Following' : 'Follow'}
                             </button>
                         )}
                         <button
                             onClick={handleMessageClick}
-                            className="flex-1 py-2 bg-[#262626] hover:bg-[#363636] border border-white/5 text-white rounded-lg font-bold text-xs transition flex items-center justify-center gap-1.5"
+                            className="flex-1 py-2.5 bg-[#262626] hover:bg-[#363636] border border-white/10 text-white rounded-xl font-bold text-xs transition flex items-center justify-center gap-1.5 active:scale-95 shadow-sm"
                         >
-                            Message
+                            <FiMessageCircle size={15} /> Message
                         </button>
+
                         {(!currentUser || currentUser.id !== profile.id) && (
                             <>
                                 <button
                                     onClick={() => handleCallClick('video')}
-                                    className="w-9 h-9 bg-[#0095f6]/10 hover:bg-[#0095f6]/20 border border-[#0095f6]/30 text-[#0095f6] rounded-lg font-bold transition flex items-center justify-center shrink-0"
+                                    className="w-10 h-10 bg-[#0095f6]/10 hover:bg-[#0095f6]/20 border border-[#0095f6]/30 text-[#0095f6] rounded-xl font-bold transition flex items-center justify-center shrink-0 active:scale-95 shadow-sm"
                                     title="Video Call"
                                 >
                                     <FiVideo size={16} />
                                 </button>
                                 <button
                                     onClick={() => handleCallClick('audio')}
-                                    className="w-9 h-9 bg-[#0095f6]/10 hover:bg-[#0095f6]/20 border border-[#0095f6]/30 text-[#0095f6] rounded-lg font-bold transition flex items-center justify-center shrink-0"
+                                    className="w-10 h-10 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 rounded-xl font-bold transition flex items-center justify-center shrink-0 active:scale-95 shadow-sm"
                                     title="Voice Call"
                                 >
                                     <FiPhone size={16} />
@@ -923,9 +980,9 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                                 <button
                                     onClick={handleToggleFavorite}
                                     disabled={favLoading}
-                                    className={`w-9 h-9 border rounded-lg font-bold transition flex items-center justify-center shrink-0 ${
+                                    className={`w-10 h-10 border rounded-xl font-bold transition flex items-center justify-center shrink-0 active:scale-95 shadow-sm ${
                                         isFavorited
-                                            ? 'bg-red-500/20 border-red-500/40 text-red-400 shadow-md shadow-red-500/10'
+                                            ? 'bg-red-500/20 border-red-500/40 text-red-400 shadow-sm shadow-red-500/10'
                                             : 'bg-white/5 hover:bg-white/10 border-white/10 text-gray-400 hover:text-white'
                                     }`}
                                     title={isFavorited ? "Saved to Favorites" : "Save to Favorites"}
@@ -936,214 +993,159 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                         )}
                     </div>
                 </div>
+            </div>
 
-                {/* ── NON-LOGGED IN USER CTA BANNER ── */}
-                {!currentUser && (
-                    <div className="rounded-2xl overflow-hidden mb-6 p-6 border border-pink-500/20 bg-gradient-to-r from-[#16162A] to-[#201633] flex flex-col sm:flex-row items-center justify-between gap-4 shadow-lg">
+            {/* ── PROFILE BODY: 2-COLUMN RESPONSIVE LAYOUT (Grid on Desktop, Stack on Mobile) ── */}
+            <div className="max-w-5xl mx-auto px-4 pt-4 pb-12">
+                <div className="lg:grid lg:grid-cols-12 lg:gap-8 items-start">
+
+                    {/* ── MAIN CONTENT: Posts Grid & Reviews (Order 2 on mobile, Order 1 on desktop) ── */}
+                    <div className={`${showBookingCard ? 'lg:col-span-7' : 'lg:col-span-12'} space-y-8 order-2 lg:order-1`}>
+                        {/* ── POSTS GRID (Instagram style) ── */}
                         <div>
-                            <h3 className="font-bold text-white text-base flex items-center gap-2">
-                                <span>☕ Connect with {profile.name}</span>
-                            </h3>
-                            <p className="text-xs text-gray-400 mt-1">Log in or create a free account to book dates, chat live, and make audio/video calls.</p>
-                        </div>
-                        <button
-                            onClick={() => setPage(PAGES.BOY_LOGIN)}
-                            className={`px-6 py-3 rounded-xl font-bold text-xs bg-gradient-to-r ${accentGrad} text-white shadow-md hover:opacity-90 transition whitespace-nowrap`}
-                        >
-                            Log In / Register
-                        </button>
-                    </div>
-                )}
-
-                {/* ── BOOKING SECTION ── */}
-                {currentUser && currentUser.id !== profile.id && (
-                    <div className="rounded-2xl overflow-hidden mb-6 border border-white/5" style={{ background: '#16162A' }}>
-                        <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
-                            <div className="flex items-center gap-2 font-bold text-white">
-                                <FiCalendar size={16} style={{ color: accentColor }} />
-                                Book a Session
+                            <div className="flex items-center gap-2 text-sm font-semibold text-gray-300 uppercase tracking-wider mb-4 pb-2 border-b border-white/5">
+                                <FiGrid size={15} />
+                                Posts ({posts.length})
                             </div>
-                            <span className="text-xs text-gray-400">₹{profile.price || 1000}/hr</span>
-                        </div>
-                        <div className="px-5 py-4">
-                            <div className="flex gap-2 flex-wrap mb-5">
-                                {[1, 2, 3, 4, 5].map((h) => (
-                                    <button
-                                        key={h}
-                                        onClick={() => setHours(h)}
-                                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${hours === h
-                                            ? `bg-gradient-to-r ${accentGrad} text-white shadow-md`
-                                            : 'bg-white/5 text-gray-400 hover:text-white border border-white/10'}`}
-                                    >
-                                        {h} hr{h > 1 ? 's' : ''}
-                                    </button>
-                                ))}
-                            </div>
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <div className="text-xs text-gray-400 mb-1">Total</div>
-                                    <div className="text-3xl font-extrabold text-transparent bg-clip-text" style={{ backgroundImage: `linear-gradient(135deg, ${accentColor}, #a855f7)` }}>
-                                        ₹{(profile.price || 1000) * hours}
+                            {(profile.is_private && !followStats.isFollowing && profile.id !== currentUser?.id) ? (
+                                <div className="py-16 text-center flex flex-col items-center gap-3 bg-[#16162A]/40 rounded-2xl border border-white/5">
+                                    <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center">
+                                        <FiLock size={24} className="text-gray-500" />
                                     </div>
+                                    <p className="text-gray-400 text-sm font-medium">This account is private</p>
+                                    <p className="text-gray-600 text-xs">Follow to see their photos</p>
                                 </div>
-                                <button
-                                    onClick={() => setShowBookingModal(true)}
-                                    className={`px-6 py-3 rounded-xl font-bold text-sm bg-gradient-to-r ${accentGrad} text-white hover:opacity-90 transition shadow-lg`}
-                                >
-                                    {bookingStatus === 'success' ? 'Request Sent ✓' : 'Book Now'}
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* ── POSTS GRID (Instagram style) ── */}
-                <div className="mb-8">
-                    <div className="flex items-center gap-2 text-sm font-semibold text-gray-300 uppercase tracking-wider mb-3 pt-2 border-t border-white/5">
-                        <FiGrid size={15} />
-                        Posts
-                    </div>
-                    {(profile.is_private && !followStats.isFollowing && profile.id !== currentUser?.id) ? (
-                        <div className="py-16 text-center flex flex-col items-center gap-3">
-                            <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center">
-                                <FiLock size={24} className="text-gray-500" />
-                            </div>
-                            <p className="text-gray-400 text-sm font-medium">This account is private</p>
-                            <p className="text-gray-600 text-xs">Follow to see their photos</p>
-                        </div>
-                    ) : posts.length === 0 ? (
-                        <div className="py-16 text-center flex flex-col items-center gap-2">
-                            <FiGrid size={36} className="text-gray-700" />
-                            <p className="text-gray-500 text-sm">No posts yet</p>
-                        </div>
-                    ) : (
-                        <div className="grid grid-cols-3 gap-0.5">
-                            {posts.map(post => (
-                                <div
-                                    key={post.id}
-                                    onClick={() => setExpandedPost(post)}
-                                    className="relative group aspect-square cursor-pointer overflow-hidden"
-                                >
-                                    <img src={post.image_url} alt="Post" className="w-full h-full object-cover transition duration-300 group-hover:brightness-75" />
-                                    {post.caption && (
-                                        <div className="absolute inset-0 flex items-end opacity-0 group-hover:opacity-100 transition-opacity duration-300 p-2">
-                                            <p className="text-white text-[10px] line-clamp-2">{post.caption}</p>
+                            ) : loadingUserData ? (
+                                <ProfileGridSkeleton count={6} />
+                            ) : posts.length === 0 ? (
+                                <div className="py-16 text-center flex flex-col items-center gap-2 bg-[#16162A]/40 rounded-2xl border border-white/5">
+                                    <FiGrid size={36} className="text-gray-700" />
+                                    <p className="text-gray-500 text-sm">No posts yet</p>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-3 gap-1 sm:gap-2">
+                                    {posts.map(post => (
+                                        <div
+                                            key={post.id}
+                                            onClick={() => setExpandedPost(post)}
+                                            className="relative group aspect-square cursor-pointer overflow-hidden rounded-xl bg-white/5"
+                                        >
+                                            <img src={post.image_url} alt="Post" className="w-full h-full object-cover transition duration-300 group-hover:scale-105" />
+                                            {post.caption && (
+                                                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent flex items-end opacity-0 group-hover:opacity-100 transition-opacity duration-300 p-2.5">
+                                                    <p className="text-white text-[10px] line-clamp-2">{post.caption}</p>
+                                                </div>
+                                            )}
                                         </div>
-                                    )}
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
-
-                {/* ── REVIEWS ── */}
-                <div className="mb-10 border-t border-white/5 pt-6">
-                    <div className="flex items-center gap-3 mb-5">
-                        <h2 className="font-bold text-white text-base flex items-center gap-2">
-                            <FiStar size={16} className="text-yellow-400" /> Reviews
-                        </h2>
-                        <span className="text-xs bg-white/5 text-gray-400 px-2.5 py-1 rounded-full border border-white/10">{reviews.length}</span>
-                    </div>
-
-                    {/* ── Rating Summary ── */}
-                    {reviews.length > 0 && (
-                        <div className="rounded-2xl p-5 mb-5 border border-white/5 flex gap-6 items-center" style={{ background: '#16162A' }}>
-                            {/* Big average */}
-                            <div className="text-center shrink-0">
-                                <div className="text-4xl font-black text-white">{avgRating || 0}</div>
-                                <div className="flex gap-0.5 justify-center mt-1">
-                                    {[1,2,3,4,5].map(s => (
-                                        <span key={s} className={`text-sm ${s <= Math.round(avgRating) ? 'text-yellow-400' : 'text-gray-700'}`}>★</span>
                                     ))}
                                 </div>
-                                <div className="text-[10px] text-gray-500 mt-1">{reviews.length} reviews</div>
-                            </div>
-                            {/* Star distribution bars */}
-                            <div className="flex-1 space-y-1">
-                                {[5,4,3,2,1].map(star => {
-                                    const count = reviews.filter(r => r.rating === star).length;
-                                    const pct = reviews.length > 0 ? (count / reviews.length) * 100 : 0;
-                                    return (
-                                        <div key={star} className="flex items-center gap-2">
-                                            <span className="text-[10px] text-gray-400 w-3 text-right">{star}</span>
-                                            <span className="text-yellow-400 text-[10px]">★</span>
-                                            <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
-                                                <div className="h-full bg-gradient-to-r from-yellow-400 to-orange-400 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
-                                            </div>
-                                            <span className="text-[10px] text-gray-500 w-6 text-right">{count}</span>
-                                        </div>
-                                    );
-                                })}
-                            </div>
+                            )}
                         </div>
-                    )}
 
-                    {/* ── Write Review ── */}
-                    {currentUser && currentUser.id !== profile.id && (
-                        <div className="rounded-2xl p-5 mb-5 border border-white/5" style={{ background: '#16162A' }}>
-                            <div className="text-xs text-gray-400 uppercase tracking-wider font-bold mb-3">Rate your experience</div>
-                            <div className="flex gap-2 mb-3">
-                                {[1, 2, 3, 4, 5].map((star) => (
-                                    <button key={star} onClick={() => setNewRating(star)} className={`text-2xl transition-transform ${newRating >= star ? 'text-yellow-400 scale-110' : 'text-gray-700 hover:text-yellow-400/40'}`}>
-                                        ★
-                                    </button>
-                                ))}
-                                <span className="text-xs text-gray-500 ml-2 self-center">{newRating}/5</span>
-                            </div>
-                            <textarea
-                                value={newReviewText}
-                                onChange={(e) => setNewReviewText(e.target.value)}
-                                placeholder="Share your experience..."
-                                rows={3}
-                                maxLength={500}
-                                className="w-full rounded-xl px-4 py-3 text-sm text-white outline-none resize-none mb-1 border border-white/10 transition focus:border-pink-500"
-                                style={{ background: '#0D0D1A', color: '#e9edef' }}
-                            />
-                            <div className="flex items-center justify-between mb-3">
-                                <span className="text-[10px] text-gray-600">{newReviewText.length}/500</span>
-                            </div>
-                            <button
-                                onClick={submitReview}
-                                disabled={!newReviewText.trim()}
-                                className={`px-5 py-2 rounded-lg text-sm font-bold transition ${newReviewText.trim() ? `bg-gradient-to-r ${accentGrad} text-white shadow-lg` : 'bg-white/5 text-gray-600 cursor-not-allowed'}`}
-                            >
-                                Submit Review
-                            </button>
+                        {/* ── REVIEWS & RATINGS SECTION ── */}
+                        <div className="border-t border-white/5 pt-6">
+                            <ReviewsSection companion={profile} currentUser={currentUser} />
                         </div>
-                    )}
-
-                    {/* ── Review Cards ── */}
-                    <div className="space-y-3">
-                        {reviews.length === 0 ? (
-                            <div className="py-10 text-center text-gray-600 text-sm">No reviews yet. Be the first!</div>
-                        ) : reviews.map((rev) => {
-                            const timeAgo = rev.created_at ? (() => {
-                                const diff = Date.now() - new Date(rev.created_at).getTime();
-                                const mins = Math.floor(diff / 60000);
-                                if (mins < 60) return `${mins}m ago`;
-                                const hrs = Math.floor(mins / 60);
-                                if (hrs < 24) return `${hrs}h ago`;
-                                const days = Math.floor(hrs / 24);
-                                if (days < 30) return `${days}d ago`;
-                                return `${Math.floor(days/30)}mo ago`;
-                            })() : '';
-                            return (
-                                <div key={rev.id} className="flex gap-3 p-4 rounded-2xl border border-white/5 hover:bg-white/5 transition" style={{ background: '#16162A' }}>
-                                    <img src={rev.reviewer_pic || 'https://i.pinimg.com/736x/89/90/48/899048ab0cc455154006fdb9676964b3.jpg'} alt={rev.reviewer_name} className="w-10 h-10 rounded-full object-cover shrink-0" />
-                                    <div className="flex-1">
-                                        <div className="flex items-center gap-2 mb-1">
-                                            <span className="font-semibold text-sm text-white">{rev.reviewer_name}</span>
-                                            <span className="text-yellow-400 text-xs bg-yellow-400/10 px-2 py-0.5 rounded-full border border-yellow-400/20">
-                                                {rev.rating} ★
-                                            </span>
-                                            {timeAgo && <span className="text-[10px] text-gray-600 ml-auto">{timeAgo}</span>}
-                                        </div>
-                                        <p className="text-gray-400 text-sm">{rev.comment}</p>
-                                    </div>
-                                </div>
-                            );
-                        })}
                     </div>
+
+                    {/* ── SIDEBAR: Sticky Booking & Action Card (Order 1 on mobile, Order 2 on desktop) ── */}
+                    {showBookingCard && (
+                        <div className="lg:col-span-5 order-1 lg:order-2 mb-8 lg:mb-0">
+                            <div className="lg:sticky lg:top-20 space-y-6">
+                                {/* ── NON-LOGGED IN USER CTA BANNER ── */}
+                                {!currentUser && (
+                                    <div className="rounded-2xl overflow-hidden p-6 border border-pink-500/20 bg-gradient-to-br from-[#16162A] to-[#201633] flex flex-col gap-4 shadow-xl">
+                                        <div>
+                                            <h3 className="font-bold text-white text-base flex items-center gap-2">
+                                                <span>☕ Connect with {profile.name}</span>
+                                            </h3>
+                                            <p className="text-xs text-gray-400 mt-1.5 leading-relaxed">Log in or create a free account to book dates, chat live, and make audio/video calls.</p>
+                                        </div>
+                                        <button
+                                            onClick={() => setPage(PAGES.BOY_LOGIN)}
+                                            className={`w-full py-3 rounded-xl font-bold text-xs bg-gradient-to-r ${accentGrad} text-white shadow-md hover:opacity-90 transition whitespace-nowrap text-center`}
+                                        >
+                                            Log In / Register
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* ── BOOKING SECTION ── */}
+                                {currentUser && currentUser.id !== profile.id && (
+                                    hasDocument ? (
+                                        <div className="rounded-2xl overflow-hidden border border-white/10 shadow-2xl" style={{ background: '#16162A' }}>
+                                            <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+                                                <div className="flex items-center gap-2 font-bold text-white">
+                                                    <FiCalendar size={16} style={{ color: accentColor }} />
+                                                    Book a Session
+                                                </div>
+                                                <span className="text-xs font-bold text-pink-400">₹{profile.price || 1000}/hr</span>
+                                            </div>
+                                            <div className="px-5 py-4">
+                                                <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">Select Duration</label>
+                                                <div className="grid grid-cols-5 gap-1.5 sm:gap-2 mb-5">
+                                                    {[1, 2, 3, 4, 5].map((h) => (
+                                                        <button
+                                                            key={h}
+                                                            onClick={() => setHours(h)}
+                                                            className={`py-2.5 rounded-xl text-xs sm:text-sm font-bold transition text-center active:scale-95 ${hours === h
+                                                                ? `bg-gradient-to-r ${accentGrad} text-white shadow-lg`
+                                                                : 'bg-white/5 text-gray-400 hover:text-white border border-white/10 hover:bg-white/10'}`}
+                                                        >
+                                                            {h} hr{h > 1 ? 's' : ''}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                                <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/5">
+                                                    <div>
+                                                        <div className="text-[11px] font-semibold text-gray-400">Total Price</div>
+                                                        <div className="text-2xl sm:text-3xl font-black text-transparent bg-clip-text" style={{ backgroundImage: `linear-gradient(135deg, ${accentColor}, #a855f7)` }}>
+                                                            ₹{(profile.price || 1000) * hours}
+                                                        </div>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => setShowBookingModal(true)}
+                                                        className={`px-6 py-3 rounded-xl font-bold text-xs sm:text-sm bg-gradient-to-r ${accentGrad} text-white hover:opacity-90 transition shadow-lg active:scale-95 whitespace-nowrap`}
+                                                    >
+                                                        {bookingStatus === 'success' ? 'Request Sent ✓' : 'Book Now'}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="rounded-2xl overflow-hidden p-5 sm:p-6 border border-purple-500/20 bg-gradient-to-br from-[#16162A] via-[#1a142e] to-[#121224] shadow-xl">
+                                            <div className="flex flex-col gap-4">
+                                                <div className="flex items-start gap-3.5">
+                                                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-pink-500/20 to-purple-600/20 border border-pink-500/30 flex items-center justify-center text-pink-400 shrink-0 mt-0.5 shadow-inner">
+                                                        <FiShield size={24} />
+                                                    </div>
+                                                    <div>
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-pink-500/10 text-pink-400 border border-pink-500/20">
+                                                                ID Verification Required
+                                                            </span>
+                                                            <span className="text-xs text-gray-400 font-semibold">₹{profile.price || 1000}/hr</span>
+                                                        </div>
+                                                        <h3 className="font-bold text-white text-base mt-1">Date Booking Locked</h3>
+                                                        <p className="text-xs text-gray-300 mt-1 leading-relaxed">
+                                                            Safe & verified companions ke sath date book karne ke liye apna government document upload karein. Normal Instagram ki tarah posts, stories, chat aur following aap bina verification ke chala sakte hain!
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                <button
+                                                    onClick={() => setShowKycModal(true)}
+                                                    className="w-full px-5 py-3 rounded-xl font-bold text-xs bg-gradient-to-r from-pink-500 to-purple-600 hover:opacity-90 text-white shadow-lg whitespace-nowrap flex items-center justify-center gap-2 transition active:scale-95"
+                                                >
+                                                    <FiShield size={14} />
+                                                    Upload ID to Unlock Booking
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )
+                                )}
+                            </div>
+                        </div>
+                    )}
                 </div>
             </div>
 
@@ -1470,9 +1472,7 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                         {/* List Area */}
                         <div className="p-4 max-h-[50vh] overflow-y-auto custom-scrollbar space-y-3">
                             {followListLoading ? (
-                                <div className="text-center py-8 text-pink-400 animate-pulse text-xs font-bold">
-                                    Loading list...
-                                </div>
+                                <MessageListSkeleton count={4} />
                             ) : followList.length === 0 ? (
                                 <div className="text-center py-8 text-gray-500 text-xs">
                                     {showFollowModal === 'followers' ? 'No followers yet.' : 'Not following anyone yet.'}
@@ -1508,6 +1508,75 @@ function DetailsPage({ girl: profile, currentUser, setPage, setSelectedGirl }) {
                                     );
                                 })
                             )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Razorpay & Escrow Payment Checkout Modal */}
+            <PaymentModal
+                isOpen={showPaymentModal}
+                onClose={() => setShowPaymentModal(false)}
+                bookingData={pendingBookingData}
+                companion={profile}
+                currentUser={currentUser}
+                onPaymentSuccess={handlePaymentSuccess}
+            />
+
+            {/* KYC Upload Modal for Date Booking */}
+            {showKycModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
+                    <div className="w-full max-w-lg">
+                        <KYCUploadPrompt
+                            user={currentUser}
+                            title="Verify ID to Book Dates"
+                            badge="Date Booking Security"
+                            subtitle="Dating & companion bookings ke liye apna government ID proof upload karein. Normal social features (posts, stories, reels, chat, follow) aap bina ID verification ke chala sakte hain."
+                            buttonText="Upload Document & Unlock Booking"
+                            onUploadSuccess={(updated) => {
+                                setShowKycModal(false);
+                                if (onUpdateUser) onUpdateUser(updated);
+                            }}
+                            onCancel={() => setShowKycModal(false)}
+                        />
+                    </div>
+                </div>
+            )}
+
+            {/* ── GUEST AUTH MODAL (Instagram / Tinder style) ── */}
+            {showGuestAuthModal && (
+                <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fade-in">
+                    <div className="w-full sm:max-w-sm bg-[#16162A] border border-white/10 rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl relative">
+                        <button
+                            onClick={() => setShowGuestAuthModal(false)}
+                            className="absolute right-4 top-4 w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white flex items-center justify-center text-sm transition"
+                        >
+                            ✕
+                        </button>
+                        <div className="text-center pt-2">
+                            <div className="w-14 h-14 mx-auto mb-3 rounded-2xl bg-gradient-to-tr from-pink-500/20 to-purple-600/20 border border-pink-500/30 flex items-center justify-center text-2xl shadow-inner">
+                                ☕
+                            </div>
+                            <h3 className="text-lg font-bold text-white mb-1.5">
+                                Connect with {profile.name}
+                            </h3>
+                            <p className="text-xs text-gray-400 max-w-xs mx-auto mb-6 leading-relaxed">
+                                {guestModalReason || "Sign in or create a free account to follow, chat, and call companions."}
+                            </p>
+                            <div className="flex flex-col gap-3">
+                                <button
+                                    onClick={() => { setShowGuestAuthModal(false); setPage(PAGES.BOY_LOGIN); }}
+                                    className="w-full py-3.5 rounded-xl font-bold bg-gradient-to-r from-[#f9ce3f] via-[#e1306c] to-[#833ab4] text-white text-sm shadow-lg active:scale-95 transition"
+                                >
+                                    Log In
+                                </button>
+                                <button
+                                    onClick={() => { setShowGuestAuthModal(false); setPage(PAGES.BOY_REGISTER); }}
+                                    className="w-full py-3 rounded-xl font-semibold bg-white/5 hover:bg-white/10 border border-white/10 text-white text-sm active:scale-95 transition"
+                                >
+                                    Create Account
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>

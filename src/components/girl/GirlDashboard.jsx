@@ -3,8 +3,16 @@ import { PAGES } from '../../App';
 import SettingsModal from '../shared/SettingsModal';
 import SOSButton from '../shared/SOSButton';
 import InstagramPostModal from '../shared/InstagramPostModal';
+import GirlWalletTab from './GirlWalletTab';
+import KYCUploadPrompt from '../shared/KYCUploadPrompt';
+import VerifiedBadge from '../shared/VerifiedBadge';
+import ImageCropperModal from '../shared/ImageCropperModal';
 import imageCompression from 'browser-image-compression';
-import { FiX, FiCheckCircle, FiLink, FiSettings, FiAlertTriangle, FiTrash2, FiCreditCard, FiStar, FiCalendar, FiBell, FiClock, FiMapPin, FiHeart, FiGrid } from "react-icons/fi";
+import { FiX, FiCheckCircle, FiLink, FiSettings, FiAlertTriangle, FiTrash2, FiCreditCard, FiStar, FiCalendar, FiBell, FiClock, FiMapPin, FiHeart, FiGrid, FiDollarSign, FiShield, FiCamera } from "react-icons/fi";
+
+// Backend API Base Configuration
+const API_BASE = process.env.REACT_APP_API_URL || "https://rentgf-and-bf.onrender.com";
+const API = `${API_BASE}/api`;
 
 function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) {
     const [stats, setStats] = useState({ earnings: 0, sessions: 0, rating: "No Rating" });
@@ -12,10 +20,55 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
     const [kycUploading, setKycUploading] = useState(false);
     const [expandedPost, setExpandedPost] = useState(null);
     const [showDpModal, setShowDpModal] = useState(false);
+    const [cropModalData, setCropModalData] = useState(null);
     const [myBookings, setMyBookings] = useState([]);
     const [newBookingAlert, setNewBookingAlert] = useState(null);
     const [showSettings, setShowSettings] = useState(false);
     const [followStats, setFollowStats] = useState({ followers: 0, following: 0 });
+
+    const handleDpFileSelect = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            setCropModalData({
+                imageSrc: reader.result,
+                isCircular: true,
+                title: "Set Profile Picture",
+                onComplete: async ({ file: croppedFile }) => {
+                    setCropModalData(null);
+                    setShowDpModal(false);
+                    const uploadFormData = new FormData();
+                    uploadFormData.append('profile_pic', croppedFile);
+                    try {
+                        const token = localStorage.getItem('token');
+                        const response = await fetch(`${API}/upload/${user.id}`, {
+                            method: 'POST',
+                            body: uploadFormData,
+                            headers: { 'Authorization': `Bearer ${token}` }
+                        });
+                        if (response.ok) {
+                            const data = await response.json();
+                            const updated = { ...user, profile_pic: data.imageUrl };
+                            setGirlUser(updated);
+                            localStorage.setItem('user', JSON.stringify(updated));
+                            if (socket) {
+                                socket.emit('active_status_changed');
+                            }
+                            alert('Profile picture updated successfully!');
+                        } else {
+                            alert('Upload failed.');
+                        }
+                    } catch (err) {
+                        console.error(err);
+                        alert('Error uploading profile picture.');
+                    }
+                }
+            });
+        };
+        reader.readAsDataURL(file);
+        e.target.value = '';
+    };
 
     const [dashboardTab, setDashboardTab] = useState('posts'); // 'posts' | 'favorites'
     const [favoritesList, setFavoritesList] = useState([]);
@@ -28,7 +81,13 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
     });
     const [followList, setFollowList] = useState([]);
     const [followListLoading, setFollowListLoading] = useState(false);
+    const hasDocument = Boolean(user?.id_proof_url || user?.kyc_status === 'verified' || user?.kyc_status === 'pending');
 
+    useEffect(() => {
+        const handleOpenSettings = () => setShowSettings(true);
+        window.addEventListener('open-settings', handleOpenSettings);
+        return () => window.removeEventListener('open-settings', handleOpenSettings);
+    }, []);
 
     useEffect(() => {
         if (!user) return;
@@ -53,32 +112,32 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                 let fetchedFollowStats = { followers: 0, following: 0 };
                 let fetchedReviews = [];
 
-                const statsRes = await fetch(`https://rentgf-and-bf.onrender.com/api/girl/stats/${user.id}`);
+                const statsRes = await fetch(`${API}/girl/stats/${user.id}`);
                 if (statsRes.ok) fetchedStats = await statsRes.json();
 
                 const token = localStorage.getItem("token");
                 const postsHeaders = {};
                 if (token) postsHeaders["Authorization"] = `Bearer ${token}`;
-                const postsRes = await fetch(`https://rentgf-and-bf.onrender.com/api/posts/${user.id}`, { headers: postsHeaders });
+                const postsRes = await fetch(`${API}/posts/${user.id}`, { headers: postsHeaders });
                 if (postsRes.ok) fetchedPosts = await postsRes.json();
 
-                const bookingsRes = await fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${user.id}`, {
+                const bookingsRes = await fetch(`${API}/bookings/${user.id}`, {
                     headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
                 });
                 if (bookingsRes.ok) fetchedBookings = await bookingsRes.json();
 
 
-                const followRes = await fetch(`https://rentgf-and-bf.onrender.com/api/follow-stats/${user.id}`);
+                const followRes = await fetch(`${API}/follow-stats/${user.id}`);
                 if (followRes.ok) fetchedFollowStats = await followRes.json();
 
-                const reviewRes = await fetch(`https://rentgf-and-bf.onrender.com/api/reviews/${user.id}`);
+                const reviewRes = await fetch(`${API}/reviews/${user.id}`);
                 if (reviewRes.ok) {
                     const data = await reviewRes.json();
                     fetchedReviews = data.reviews;
                 }
 
                 if (token) {
-                    const favsRes = await fetch("https://rentgf-and-bf.onrender.com/api/favorites", {
+                    const favsRes = await fetch(`${API}/favorites`, {
                         headers: { Authorization: `Bearer ${token}` }
                     });
                     if (favsRes.ok) {
@@ -114,8 +173,9 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
         socket.emit("join_own_room", user.id);
 
         const handleReceiveBooking = (data) => {
+            if (!hasDocument) return;
             setNewBookingAlert(data);
-            fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${user.id}`, {
+            fetch(`${API}/bookings/${user.id}`, {
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
             })
                 .then(res => res.json())
@@ -148,7 +208,7 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
             formData.append("id_document", compressedFile);
 
             const token = localStorage.getItem('token');
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/kyc/${user.id}`, {
+            const response = await fetch(`${API}/kyc/${user.id}`, {
                 method: "POST",
                 body: formData,
                 headers: { 'Authorization': `Bearer ${token}` }
@@ -169,7 +229,7 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
 
     const handleBookingStatus = async (bookingId, newStatus) => {
         try {
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${bookingId}`, {
+            const response = await fetch(`${API}/bookings/${bookingId}`, {
                 method: "PUT",
                 headers: {
                     "Content-Type": "application/json",
@@ -182,7 +242,7 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
             if (response.ok) {
                 setMyBookings(myBookings.map(b => b.id === bookingId ? { ...b, status: newStatus } : b));
                 if (newStatus === 'completed') {
-                    const statsRes = await fetch(`https://rentgf-and-bf.onrender.com/api/girl/stats/${user.id}`);
+                    const statsRes = await fetch(`${API}/girl/stats/${user.id}`);
                     if (statsRes.ok) setStats(await statsRes.json());
                 }
             }
@@ -196,7 +256,7 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
         if (reason === null) return;
         
         try {
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${bookingId}/cancel`, {
+            const response = await fetch(`${API}/bookings/${bookingId}/cancel`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -229,7 +289,7 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
         if (!time) return;
 
         try {
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${bookingId}/reschedule`, {
+            const response = await fetch(`${API}/bookings/${bookingId}/reschedule`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -258,7 +318,7 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
 
     const handleRespondReschedule = async (bookingId, action) => {
         try {
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${bookingId}/reschedule/respond`, {
+            const response = await fetch(`${API}/bookings/${bookingId}/reschedule/respond`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -299,7 +359,7 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
             const endpoint = type === 'followers'
                 ? `/api/followers-list/${user.id}`
                 : `/api/following-list/${user.id}`;
-            const res = await fetch(`https://rentgf-and-bf.onrender.com${endpoint}`, { headers });
+            const res = await fetch(`${API_BASE}${endpoint}`, { headers });
             if (res.ok) setFollowList(await res.json());
         } catch (e) { console.error(e); }
         setFollowListLoading(false);
@@ -309,7 +369,7 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
         if (!await window.showConfirm("Are you sure you want to delete this photo?")) return;
         try {
             const token = localStorage.getItem("token");
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/posts/${postId}`, { 
+            const response = await fetch(`${API}/posts/${postId}`, { 
                 method: "DELETE",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -330,17 +390,19 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
         return b.status === bookingFilter;
     });
 
-    const notificationsList = pendingBookings.map(b => ({
-        id: `booking-${b.id}`,
-        type: 'booking',
-        message: `${b.boy_name} requested a booking for ${b.hours} hrs.`,
-        time: b.created_at,
-        pic: b.boy_pic
-    }));
+    const notificationsList = hasDocument
+        ? pendingBookings.map(b => ({
+            id: `booking-${b.id}`,
+            type: 'booking',
+            message: `${b.boy_name} requested a booking for ${b.hours} hrs.`,
+            time: b.created_at,
+            pic: b.boy_pic
+        }))
+        : [];
 
     return (
         <div className="pt-16 pb-20 min-h-[100dvh] relative bg-[#0D0D1A]">
-            {newBookingAlert && (
+            {newBookingAlert && hasDocument && (
                 <div className="fixed top-20 right-6 z-50 bg-pink-500 text-white px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 animate-bounce">
                     <span className="text-2xl">🔔</span>
                     <div>
@@ -368,6 +430,21 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                                     "😊"
                                 )}
                             </div>
+
+                            {/* Camera Edit Badge */}
+                            <label
+                                className="absolute bottom-0 right-0 w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gradient-to-r from-pink-500 to-purple-600 text-white flex items-center justify-center cursor-pointer shadow-lg border-2 border-[#0D0D1A] hover:scale-110 active:scale-95 transition z-10"
+                                title="Change or adjust profile picture"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <FiCamera size={13} />
+                                <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={handleDpFileSelect}
+                                />
+                            </label>
                         </div>
 
                         {/* Stats columns */}
@@ -398,9 +475,7 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                         <div className="flex items-center gap-2 mb-1.5">
                             <h1 className="text-base sm:text-lg font-bold text-white">{user.name} 💕</h1>
                             {user.kyc_status === 'verified' && (
-                                <span className="flex items-center gap-1 text-[9px] bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full font-bold">
-                                    ✓ Verified
-                                </span>
+                                <VerifiedBadge size="sm" />
                             )}
                         </div>
                         {user.bio && <p className="text-gray-300 text-sm leading-relaxed mb-1 italic">"{user.bio}"</p>}
@@ -408,20 +483,33 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                             <a
                                 href={user.social_link.startsWith('http') ? user.social_link : `https://${user.social_link}`}
                                 target="_blank" rel="noreferrer"
-                                className="text-pink-400 text-sm hover:underline flex items-center gap-1 w-fit mt-1.5"
+                                className="text-pink-400 text-xs hover:underline flex items-center gap-1 w-fit mt-1.5"
                             >
                                 <FiLink size={12} /> {user.social_link}
                             </a>
                         )}
                     </div>
 
-                    {/* Full-width action button for Edit Profile */}
-                    <div className="w-full flex gap-3">
+                    {/* Instagram-Style Profile Action Buttons */}
+                    <div className="w-full flex gap-2">
                         <button
                             onClick={() => setShowSettings(true)}
-                            className="flex-1 py-2 bg-white/10 border border-white/20 text-white rounded-xl text-xs font-bold hover:bg-white/20 transition flex items-center justify-center gap-1.5"
+                            className="flex-1 py-1.5 bg-[#262626] hover:bg-[#363636] text-white rounded-lg text-xs font-semibold transition active:scale-95 flex items-center justify-center gap-1.5"
                         >
-                            <FiSettings size={13} /> Edit Profile
+                            <FiSettings size={13} /> Edit profile
+                        </button>
+                        <button
+                            onClick={() => {
+                                if (navigator.share) {
+                                    navigator.share({ title: user.name, url: window.location.href }).catch(() => {});
+                                } else {
+                                    navigator.clipboard.writeText(window.location.href);
+                                    alert("Profile link copied! 📋");
+                                }
+                            }}
+                            className="flex-1 py-1.5 bg-[#262626] hover:bg-[#363636] text-white rounded-lg text-xs font-semibold transition active:scale-95 flex items-center justify-center gap-1.5"
+                        >
+                            Share profile
                         </button>
                     </div>
                 </div>
@@ -476,37 +564,43 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                     )}
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-7">
-                    <div className="bg-[#16162A] border border-white/5 rounded-2xl p-4 cursor-pointer hover:bg-white/5 transition flex flex-col justify-between" onClick={() => setActiveStatModal('earnings')}>
-                        <div className="text-[11px] text-gray-400 mb-1 flex items-center gap-1.5"><FiCreditCard size={12} /> Earnings</div>
-                        <div className="text-xl font-bold text-pink-400">₹{stats.earnings}</div>
-                    </div>
+                <div className={`grid ${hasDocument ? 'grid-cols-3' : 'grid-cols-2'} gap-3 mb-7`}>
                     <div className="bg-[#16162A] border border-white/5 rounded-2xl p-4 cursor-pointer hover:bg-white/5 transition flex flex-col justify-between" onClick={() => setActiveStatModal('rating')}>
                         <div className="text-[11px] text-gray-400 mb-1 flex items-center gap-1.5"><FiStar size={12} className="text-yellow-400 fill-yellow-400" /> Rating</div>
-                        <div className="text-xl font-bold text-yellow-400 flex items-center gap-1">{stats.rating} {stats.rating !== "No Rating" && <FiStar size={14} className="fill-yellow-400 text-yellow-400" />}</div>
+                        <div className="text-xl font-bold text-yellow-400 flex items-center gap-1">
+                            {reviews.length > 0 
+                                ? (reviews.reduce((acc, curr) => acc + curr.rating, 0) / reviews.length).toFixed(1) 
+                                : (stats.rating || "No Rating")
+                            }
+                            {(reviews.length > 0 || (stats.rating && stats.rating !== "No Rating")) && (
+                                <FiStar size={14} className="fill-yellow-400 text-yellow-400" />
+                            )}
+                        </div>
                     </div>
-                    <div className="bg-[#16162A] border border-white/5 rounded-2xl p-4 cursor-pointer hover:bg-white/5 transition relative flex flex-col justify-between" onClick={() => setActiveStatModal('my_bookings')}>
-                        <div className="text-[11px] text-gray-400 mb-1 flex items-center gap-1.5"><FiCalendar size={12} /> Bookings</div>
-                        <div className="text-xl font-bold text-green-400">{completedBookings.length}</div>
-                        {pendingBookings.length > 0 && (
-                            <span className="absolute top-2 right-2 flex h-3 w-3">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pink-400 opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-3 w-3 bg-pink-500"></span>
-                            </span>
-                        )}
-                    </div>
+                    {hasDocument && (
+                        <div className="bg-[#16162A] border border-white/5 rounded-2xl p-4 cursor-pointer hover:bg-white/5 transition relative flex flex-col justify-between" onClick={() => setActiveStatModal('my_bookings')}>
+                            <div className="text-[11px] text-gray-400 mb-1 flex items-center gap-1.5"><FiCalendar size={12} /> Bookings</div>
+                            <div className="text-xl font-bold text-green-400">{completedBookings.length}</div>
+                            {pendingBookings.length > 0 && (
+                                <span className="absolute top-2 right-2 flex h-3 w-3">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pink-400 opacity-75"></span>
+                                    <span className="relative inline-flex rounded-full h-3 w-3 bg-pink-500"></span>
+                                </span>
+                            )}
+                        </div>
+                    )}
                     <div className="bg-[#16162A] border border-white/5 rounded-2xl p-4 cursor-pointer hover:bg-white/5 transition flex flex-col justify-between" onClick={() => setActiveStatModal('notifications')}>
-                        <div className="text-[11px] text-gray-400 mb-1 flex items-center gap-1.5"><FiBell size={12} /> Notifications</div>
+                        <div className="text-[11px] text-gray-400 mb-1 flex items-center gap-1.5"><FiBell size={12} /> Alerts</div>
                         <div className="text-xl font-bold text-purple-400">{notificationsList.length}</div>
                     </div>
                 </div>
 
-                {/* ── Tabs Header (Posts vs Saved Favorites) ── */}
+                {/* ── Tabs Header (Posts vs Saved Favorites vs Wallet) ── */}
                 <div className="mb-6 border-t border-white/5 pt-3">
-                    <div className="flex justify-center sm:justify-start gap-2 border-b border-white/10 mb-4">
+                    <div className="flex justify-center sm:justify-start gap-2 border-b border-white/10 mb-4 overflow-x-auto">
                         <button
                             onClick={() => setDashboardTab('posts')}
-                            className={`flex items-center gap-2 py-3 px-6 text-xs font-bold border-b-2 transition ${
+                            className={`flex items-center gap-2 py-3 px-5 text-xs font-bold border-b-2 transition whitespace-nowrap ${
                                 dashboardTab === 'posts'
                                     ? 'border-pink-500 text-pink-400'
                                     : 'border-transparent text-gray-400 hover:text-white'
@@ -514,9 +608,21 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                         >
                             <FiGrid size={15} /> Posts ({myPosts.length})
                         </button>
+                        {hasDocument && (
+                            <button
+                                onClick={() => setDashboardTab('wallet')}
+                                className={`flex items-center gap-2 py-3 px-5 text-xs font-bold border-b-2 transition whitespace-nowrap ${
+                                    dashboardTab === 'wallet'
+                                        ? 'border-emerald-500 text-emerald-400'
+                                        : 'border-transparent text-gray-400 hover:text-white'
+                                }`}
+                            >
+                                <FiDollarSign size={15} /> Earnings & Wallet 💰
+                            </button>
+                        )}
                         <button
                             onClick={() => setDashboardTab('favorites')}
-                            className={`flex items-center gap-2 py-3 px-6 text-xs font-bold border-b-2 transition ${
+                            className={`flex items-center gap-2 py-3 px-5 text-xs font-bold border-b-2 transition whitespace-nowrap ${
                                 dashboardTab === 'favorites'
                                     ? 'border-pink-500 text-pink-400'
                                     : 'border-transparent text-gray-400 hover:text-white'
@@ -525,6 +631,17 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                             <FiHeart size={15} className={dashboardTab === 'favorites' ? "fill-pink-500 text-pink-500" : ""} /> Saved Favorites ({favoritesList.length})
                         </button>
                     </div>
+
+                    {/* Wallet View */}
+                    {dashboardTab === 'wallet' && (
+                        hasDocument ? (
+                            <GirlWalletTab user={user} />
+                        ) : (
+                            <div className="py-6 max-w-lg mx-auto">
+                                <KYCUploadPrompt user={user} onUploadSuccess={(updated) => setGirlUser(updated)} />
+                            </div>
+                        )
+                    )}
 
                     {/* Posts View */}
                     {dashboardTab === 'posts' && (
@@ -573,7 +690,7 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                                             <div className="flex-1 min-w-0">
                                                 <div className="text-sm font-bold text-white truncate flex items-center gap-1.5">
                                                     <span>{fav.name}</span>
-                                                    {fav.kyc_status === 'verified' && <span className="text-blue-400 text-xs">✔</span>}
+                                                    {fav.kyc_status === 'verified' && <VerifiedBadge size="xs" />}
                                                 </div>
                                                 <div className="text-[11px] text-gray-400 truncate">@{fav.username || fav.name.toLowerCase().replace(/\s+/g, '')}</div>
                                                 <div className="text-[11px] text-gray-500 flex items-center gap-1 mt-0.5">
@@ -644,10 +761,22 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                             />
                         </div>
                         
-                        {/* Label */}
-                        <div className="mt-4 text-center">
-                            <span className="text-white font-bold text-sm">{user.name}</span>
-                            <span className="text-gray-400 text-xs block mt-0.5">Profile Picture</span>
+                        {/* Label & Change Button */}
+                        <div className="mt-4 text-center flex flex-col items-center gap-2">
+                            <div>
+                                <span className="text-white font-bold text-sm">{user.name}</span>
+                                <span className="text-gray-400 text-xs block mt-0.5">Profile Picture</span>
+                            </div>
+                            <label className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-gradient-to-r from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700 text-white text-xs font-bold shadow-lg shadow-pink-500/30 cursor-pointer transition active:scale-95">
+                                <FiCamera size={14} />
+                                <span>Change / Adjust Photo</span>
+                                <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={handleDpFileSelect}
+                                />
+                            </label>
                         </div>
                     </div>
                 </div>
@@ -682,6 +811,14 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                         <div className="overflow-y-auto p-5 space-y-4 custom-scrollbar">
 
                             {activeStatModal === 'my_bookings' && (
+                                !hasDocument ? (
+                                    <div className="py-8 text-center flex flex-col items-center gap-3">
+                                        <FiShield size={36} className="text-pink-400" />
+                                        <div className="font-bold text-white text-sm">ID Verification Required</div>
+                                        <p className="text-xs text-gray-400 max-w-xs">Dating Requests aur Bookings access karne ke liye apna Govt ID document upload karein.</p>
+                                        <button onClick={() => { setActiveStatModal(null); setShowSettings(true); }} className="px-5 py-2 rounded-xl text-xs font-bold bg-pink-500 text-white">Upload Document</button>
+                                    </div>
+                                ) : (
                                 <>
                                     <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar shrink-0 sticky top-0 bg-[#16162A] z-10 -mt-2 pt-2">
                                         {['all', 'pending', 'accepted', 'completed', 'canceled'].map(filter => (
@@ -782,7 +919,8 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                                             ))}
                                         </div>
                                     )}
-                                </>
+                                    </>
+                                )
                             )}
 
                             {activeStatModal === 'earnings' && (
@@ -861,6 +999,15 @@ function GirlDashboard({ user, setGirlUser, setPage, setSelectedGirl, socket }) 
                         </div>
                     </div>
                 </div>
+            )}
+            {cropModalData && (
+                <ImageCropperModal
+                    imageSrc={cropModalData.imageSrc}
+                    isCircular={cropModalData.isCircular}
+                    title={cropModalData.title}
+                    onCropComplete={cropModalData.onComplete}
+                    onClose={() => setCropModalData(null)}
+                />
             )}
             <SOSButton user={user} socket={socket} />
         </div>

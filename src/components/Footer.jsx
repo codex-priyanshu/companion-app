@@ -1,5 +1,6 @@
 import React from "react";
 import { PAGES } from "../App";
+import { APP_VERSION_TAG } from "../config/version";
 
 function Footer({ setPage }) {
     return (
@@ -14,27 +15,12 @@ function Footer({ setPage }) {
                                 fill="none"
                                 xmlns="http://www.w3.org/2000/svg"
                             >
-                                <path
-                                    d="M49.9999 15L23.157 30.5V61.5L49.9999 77L76.8428 61.5V30.5L49.9999 15Z"
-                                    stroke="url(#ai-grad)"
-                                    strokeWidth="6"
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                />
-                                <path
-                                    d="M49.9999 35L36.1436 43V59L49.9999 67L63.8563 59V43L49.9999 35Z"
-                                    stroke="url(#ai-grad)"
-                                    strokeWidth="6"
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                />
-                                <path
-                                    d="M23 30.5L50 50M77 30.5L50 50M50 77V50"
-                                    stroke="url(#ai-grad)"
-                                    strokeWidth="6"
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                />
+                                <path d="M22 40H68C68 40 69 68 45 68C21 68 22 40 22 40Z" stroke="url(#ai-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+                                <path d="M68 45H75C80 45 83 48 83 53C83 58 80 61 75 61H66" stroke="url(#ai-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+                                <path d="M18 75H72" stroke="url(#ai-grad)" strokeWidth="6" strokeLinecap="round"/>
+                                <path d="M45 29C40 23 32 30 39 37L45 42L51 37C58 30 50 23 45 29Z" fill="url(#ai-grad)"/>
+                                <path d="M31 27C30 24 31 21 33 19" stroke="url(#ai-grad)" strokeWidth="4" strokeLinecap="round"/>
+                                <path d="M59 27C60 24 59 21 57 19" stroke="url(#ai-grad)" strokeWidth="4" strokeLinecap="round"/>
                                 <defs>
                                     <linearGradient id="ai-grad" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse">
                                         <stop stopColor="#ec4899" />
@@ -70,9 +56,15 @@ function Footer({ setPage }) {
                     </div>
                 </div>
                 <div className="border-t border-white/10 pt-8 flex flex-col md:flex-row justify-between items-center gap-4">
-                    <p className="text-xs text-gray-500">
-                        © {new Date().getFullYear()} Coffeely. All rights reserved.
-                    </p>
+                    <div className="flex items-center gap-3 flex-wrap">
+                        <p className="text-xs text-gray-500">
+                            © {new Date().getFullYear()} Coffeely. All rights reserved.
+                        </p>
+                        <span className="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                            {APP_VERSION_TAG} (Latest)
+                        </span>
+                    </div>
                     <div className="flex gap-4 text-sm text-gray-400">
                         <a href="https://www.instagram.com/rentgf.in?igsh=b29iNDkxejFnaDJt" target="_blank" rel="noreferrer">
                             <span className="hover:text-pink-400 cursor-pointer transition">📸 Instagram</span>

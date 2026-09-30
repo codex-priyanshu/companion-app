@@ -385,9 +385,13 @@ router.get('/notifications/:userId', authenticateToken, async (req, res) => {
         }
 
         const notifQuery = `
-            SELECT n.id, n.type, n.post_id, n.is_read, n.created_at,
-                   u.name as sender_name, u.profile_pic as sender_pic,
-                   p.image_url as post_image
+            SELECT n.id, n.type, n.post_id, n.is_read, n.created_at, n.sender_id,
+                   u.name as sender_name, u.username as sender_username, u.profile_pic as sender_pic,
+                   p.image_url as post_image, p.caption as post_caption,
+                   EXISTS (
+                       SELECT 1 FROM follows 
+                       WHERE follower_id = $1 AND following_id = n.sender_id
+                   ) as is_following_sender
             FROM notifications n
             JOIN users u ON n.sender_id = u.id
             LEFT JOIN posts p ON n.post_id = p.id
@@ -398,6 +402,37 @@ router.get('/notifications/:userId', authenticateToken, async (req, res) => {
         await pool.query("UPDATE notifications SET is_read = true WHERE user_id = $1", [userId]);
         res.status(200).json(notifications.rows);
     } catch (err) {
+        console.error("Notifications fetch error:", err);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
+// ─── CLEAR ALL NOTIFICATIONS ─────────────────────────────────
+router.delete('/notifications/:userId/clear-all', authenticateToken, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (parseInt(req.user.id) !== parseInt(userId)) {
+            return res.status(403).json({ error: "Forbidden: Unauthorized." });
+        }
+        await pool.query("DELETE FROM notifications WHERE user_id = $1", [userId]);
+        res.status(200).json({ message: "All notifications cleared successfully." });
+    } catch (err) {
+        console.error("Clear notifications error:", err);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
+// ─── DELETE SINGLE NOTIFICATION ──────────────────────────────
+router.delete('/notifications/:userId/item/:notifId', authenticateToken, async (req, res) => {
+    try {
+        const { userId, notifId } = req.params;
+        if (parseInt(req.user.id) !== parseInt(userId)) {
+            return res.status(403).json({ error: "Forbidden: Unauthorized." });
+        }
+        await pool.query("DELETE FROM notifications WHERE id = $1 AND user_id = $2", [notifId, userId]);
+        res.status(200).json({ message: "Notification deleted successfully." });
+    } catch (err) {
+        console.error("Delete notification error:", err);
         res.status(500).json({ error: "Server error" });
     }
 });

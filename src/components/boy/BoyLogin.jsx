@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { PAGES } from "../../App";
+import { getFriendlyErrorMessage } from "../../utils/errorHandler";
 
 function BoyLogin({ setPage, setBoyUser }) {
     const [form, setForm] = useState({ email: "", password: "" });
@@ -8,8 +9,14 @@ function BoyLogin({ setPage, setBoyUser }) {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
-        setLoading(true);
         setError("");
+
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            setError("No internet connection. Please check your network to login.");
+            return;
+        }
+
+        setLoading(true);
 
         try {
             const response = await fetch("https://rentgf-and-bf.onrender.com/api/login", {
@@ -24,21 +31,22 @@ function BoyLogin({ setPage, setBoyUser }) {
                 }),
             });
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({}));
 
             if (response.ok) {
                 localStorage.setItem("token", data.token);
-                // Nayi line: User data bhi local storage mein save karo
                 localStorage.setItem("user", JSON.stringify(data.user));
 
                 setBoyUser(data.user);
                 setPage(PAGES.BOY_DASHBOARD);
+            } else if (response.status === 401) {
+                setError(data.error || "Incorrect email or password. Please try again.");
             } else {
-                setError(data.error);
+                setError(getFriendlyErrorMessage(null, data, "Login failed. Please check your credentials."));
             }
         } catch (err) {
             console.error(err);
-            setError("Server se connect nahi ho paya. Backend chalu hai?");
+            setError(getFriendlyErrorMessage(err, null, "Unable to reach server. Please check your connection."));
         } finally {
             setLoading(false);
         }

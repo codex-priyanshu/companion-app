@@ -19,7 +19,7 @@ const isOwner = (req, res, userId) => {
 router.get('/me', authenticateToken, async (req, res) => {
     try {
         const userResult = await pool.query(
-            "SELECT id, name, username, email, role, age, city, bio, price, profile_pic, tags, is_private, show_online, kyc_status, social_link, latitude, longitude FROM users WHERE id = $1",
+            "SELECT id, name, username, email, role, age, city, bio, price, profile_pic, tags, is_private, show_online, kyc_status, id_proof_url, social_link, latitude, longitude FROM users WHERE id = $1",
             [req.user.id]
         );
         if (userResult.rows.length === 0) return res.status(404).json({ error: "User nahi mila!" });
@@ -60,9 +60,8 @@ router.get('/users', async (req, res) => {
                    COUNT(r.id) as review_count
             FROM users u
             LEFT JOIN reviews r ON u.id = r.companion_id
-            WHERE u.is_verified = true 
-              AND u.is_frozen = false 
-              AND u.is_platform_blocked = false
+            WHERE (u.is_frozen IS NOT TRUE) 
+              AND (u.is_platform_blocked IS NOT TRUE)
               ${roleFilter}
         `;
 
@@ -121,7 +120,7 @@ router.put('/users/:userId', authenticateToken, moderateContent, async (req, res
             `UPDATE users 
              SET age = $1, city = $2, bio = $3, price = $4, tags = $5, is_private = $6, show_online = $7, name = $8, username = $9, social_link = $10, latitude = COALESCE($11, latitude), longitude = COALESCE($12, longitude) 
              WHERE id = $13 
-             RETURNING id, name, username, email, role, age, city, bio, price, tags, is_private, show_online, kyc_status, social_link, latitude, longitude`,
+             RETURNING id, name, username, email, role, age, city, bio, price, tags, is_private, show_online, kyc_status, id_proof_url, social_link, latitude, longitude`,
             [age || null, city || '', bio || '', safePrice, tags || 'Coffee Date, Movie', is_private || false, show_online !== false, name || '', cleanUsername, link || '', latitude || null, longitude || null, parseInt(userId)]
         );
         res.status(200).json({ message: "Profile Updated", user: updatedUser.rows[0] });
@@ -139,13 +138,43 @@ router.delete('/users/:userId', authenticateToken, async (req, res) => {
         // Admins can delete any user; others can only delete their own
         if (req.user.role !== 'admin' && !isOwner(req, res, userId)) return;
 
-        await pool.query("DELETE FROM posts WHERE user_id = $1", [userId]);
-        await pool.query("DELETE FROM messages WHERE sender_id = $1 OR receiver_id = $1", [userId]);
-        await pool.query("DELETE FROM bookings WHERE boy_id = $1 OR girl_id = $1", [userId]);
-        await pool.query("DELETE FROM reviews WHERE reviewer_id = $1 OR companion_id = $1", [userId]);
-        await pool.query("DELETE FROM notifications WHERE user_id = $1 OR sender_id = $1", [userId]);
-        await pool.query("DELETE FROM users WHERE id = $1", [userId]);
-        res.status(200).json({ message: "Account deleted forever" });
+        // Perform safe atomic deletion within a transaction
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+
+            await client.query("DELETE FROM likes WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM comments WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM saved_posts WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM story_views WHERE viewer_id = $1", [userId]);
+            await client.query("DELETE FROM stories WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM push_subscriptions WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM favorites WHERE user_id = $1 OR companion_id = $1", [userId]);
+            await client.query("DELETE FROM follows WHERE follower_id = $1 OR following_id = $1", [userId]);
+            await client.query("DELETE FROM call_history WHERE caller_id = $1 OR receiver_id = $1", [userId]);
+            await client.query("DELETE FROM blocked_users WHERE blocker_id = $1 OR blocked_id = $1", [userId]);
+            await client.query("DELETE FROM emergency_contacts WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM sos_alerts WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM wallet_transactions WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM payout_requests WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM wallet_balances WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM reports WHERE reporter_id = $1 OR reported_id = $1", [userId]);
+            await client.query("DELETE FROM notifications WHERE user_id = $1 OR sender_id = $1", [userId]);
+            await client.query("DELETE FROM reviews WHERE reviewer_id = $1 OR companion_id = $1", [userId]);
+            await client.query("DELETE FROM bookings WHERE boy_id = $1 OR girl_id = $1", [userId]);
+            await client.query("DELETE FROM messages WHERE sender_id = $1 OR receiver_id = $1", [userId]);
+            await client.query("DELETE FROM posts WHERE user_id = $1", [userId]);
+            await client.query("DELETE FROM users WHERE id = $1", [userId]);
+
+            await client.query('COMMIT');
+            res.status(200).json({ message: "Account deleted successfully." });
+        } catch (err) {
+            await client.query('ROLLBACK');
+            console.error('Self-account delete error:', err);
+            res.status(500).json({ error: "Failed to delete account. Database rolled back." });
+        } finally {
+            client.release();
+        }
     } catch (err) {
         res.status(500).json({ error: "Server error" });
     }
@@ -518,10 +547,45 @@ router.get('/favorites/check/:companionId', authenticateToken, async (req, res) 
             "SELECT 1 FROM favorites WHERE user_id = $1 AND companion_id = $2",
             [userId, companionId]
         );
-
         res.status(200).json({ isFavorited: result.rows.length > 0 });
     } catch (err) {
         console.error("Check favorite error:", err);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
+// 18. Get User / Companion Stats (Rating, Sessions, Bookings, Earnings)
+router.get(['/girl/stats/:userId', '/user/stats/:userId'], async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const avgResult = await pool.query(
+            "SELECT ROUND(AVG(rating), 1) as avg_rating, COUNT(id) as total_count FROM reviews WHERE companion_id = $1",
+            [userId]
+        );
+        const bookingResult = await pool.query(
+            "SELECT COUNT(id) as total_bookings, COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_sessions FROM bookings WHERE girl_id = $1 OR boy_id = $1",
+            [userId]
+        );
+        const walletResult = await pool.query(
+            "SELECT available_balance, pending_escrow, total_earned FROM wallet_balances WHERE user_id = $1",
+            [userId]
+        );
+
+        const totalCount = parseInt(avgResult.rows[0]?.total_count || 0);
+        const avgRating = totalCount > 0 ? parseFloat(avgResult.rows[0]?.avg_rating).toFixed(1) : "No Rating";
+        const sessions = parseInt(bookingResult.rows[0]?.completed_sessions || 0);
+        const bookings = parseInt(bookingResult.rows[0]?.total_bookings || 0);
+        const earnings = walletResult.rows.length > 0 ? parseFloat(walletResult.rows[0]?.total_earned || 0) : 0;
+
+        res.status(200).json({
+            rating: avgRating,
+            sessions,
+            bookings,
+            earnings,
+            totalReviews: totalCount
+        });
+    } catch (err) {
+        console.error("Get companion stats error:", err);
         res.status(500).json({ error: "Server error" });
     }
 });

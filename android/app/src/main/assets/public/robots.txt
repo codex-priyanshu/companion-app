@@ -1,0 +1,12 @@
+# Coffeely Search Engine Crawling Directives
+User-agent: *
+Allow: /
+
+User-agent: Googlebot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+# Sitemap Index
+Sitemap: https://rentgf-and-bf.onrender.com/sitemap.xml

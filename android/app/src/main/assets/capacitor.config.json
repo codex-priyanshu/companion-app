@@ -1,0 +1,10 @@
+{
+	"appId": "com.coffeely.app",
+	"appName": "Coffeely",
+	"webDir": "build",
+	"bundledWebRuntime": false,
+	"server": {
+		"androidScheme": "https",
+		"cleartext": true
+	}
+}

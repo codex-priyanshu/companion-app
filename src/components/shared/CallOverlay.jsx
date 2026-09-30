@@ -1,12 +1,51 @@
 import React, { useState, useEffect, useRef } from "react";
 import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiPhone, FiPhoneOff, FiRefreshCw } from "react-icons/fi";
 
-const ICE_SERVERS = {
+const DEFAULT_ICE_SERVERS = {
     iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
         { urls: "stun:stun1.l.google.com:19302" },
-        { urls: "stun:stun2.l.google.com:19302" }
-    ]
+        { urls: "stun:stun2.l.google.com:19302" },
+        { urls: "stun:stun.services.mozilla.com" },
+        {
+            urls: [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:443",
+                "turn:openrelay.metered.ca:443?transport=tcp"
+            ],
+            username: "openrelayproject",
+            credential: "openrelayproject"
+        },
+        {
+            urls: [
+                "turns:openrelay.metered.ca:443?transport=tcp",
+                "turns:openrelay.metered.ca:5349"
+            ],
+            username: "openrelayproject",
+            credential: "openrelayproject"
+        }
+    ],
+    iceCandidatePoolSize: 2
+};
+
+const API_BASE = process.env.REACT_APP_API_URL || "https://rentgf-and-bf.onrender.com";
+const API = `${API_BASE}/api`;
+
+const extractIceCandidate = (data) => {
+    if (!data) return null;
+    let cand = data.candidate !== undefined && typeof data.candidate === 'object' ? data.candidate : data;
+    if (typeof cand === 'string') {
+        if (data.sdpMid !== undefined || data.sdpMLineIndex !== undefined) {
+            return {
+                candidate: cand,
+                sdpMid: data.sdpMid,
+                sdpMLineIndex: data.sdpMLineIndex,
+                usernameFragment: data.usernameFragment
+            };
+        }
+        return { candidate: cand };
+    }
+    return cand;
 };
 
 function CallOverlay({ socket, currentUser }) {
@@ -19,6 +58,8 @@ function CallOverlay({ socket, currentUser }) {
     const [callDuration, setCallDuration] = useState(0);
     const [statusText, setStatusText] = useState("Calling...");
     const [showBanner, setShowBanner] = useState(true);
+    const [localStream, setLocalStream] = useState(null);
+    const [remoteStream, setRemoteStream] = useState(null);
 
     const [netQuality, setNetQuality] = useState({ status: 'good', rtt: 30, label: '🟢 HD Quality (Strong Signal)' });
 
@@ -28,6 +69,11 @@ function CallOverlay({ socket, currentUser }) {
 
     const peerConnectionRef = useRef(null);
     const localStreamRef = useRef(null);
+    const remoteStreamRef = useRef(null);
+    const partnerRef = useRef(null);
+    const isCallerRef = useRef(false);
+    const callTypeRef = useRef("video");
+    const callStateRef = useRef("idle");
     const iceQueueRef = useRef([]);
     const audioContextRef = useRef(null);
     const ringtoneTimerRef = useRef(null);
@@ -42,33 +88,38 @@ function CallOverlay({ socket, currentUser }) {
         if (hasLoggedCallRef.current) return;
         hasLoggedCallRef.current = true;
 
-        if (!socket || !partner || !currentUser) return;
+        // ONLY the caller initiates the chat call log and DB history to avoid duplicate entries
+        if (!isCallerRef.current) return;
+
+        const p = partnerRef.current || partner;
+        const currentType = callTypeRef.current || callType;
+        if (!socket || !p || !currentUser) return;
 
         let logText = overrideText;
         let callStatus = 'completed';
         if (!logText) {
-            if (callState === 'active' && callDurationRef.current > 0) {
+            if (callStateRef.current === 'active' && callDurationRef.current > 0) {
                 const m = Math.floor(callDurationRef.current / 60);
                 const s = callDurationRef.current % 60;
                 const durStr = `${m}m ${s}s`;
-                logText = `📞 ${callType === 'video' ? 'Video' : 'Voice'} Call - ${durStr}`;
+                logText = `📞 ${currentType === 'video' ? 'Video' : 'Voice'} Call - ${durStr}`;
                 callStatus = 'completed';
             } else {
-                logText = `📞 Missed ${callType === 'video' ? 'Video' : 'Voice'} Call`;
+                logText = `📞 Missed ${currentType === 'video' ? 'Video' : 'Voice'} Call`;
                 callStatus = 'missed';
             }
         }
 
         socket.emit("send_message", {
             sender_id: currentUser.id,
-            receiver_id: partner.id,
+            receiver_id: p.id,
             message: logText,
-            room: partner.room,
+            room: p.room,
             is_call_log: true
         });
 
         const token = localStorage.getItem("token");
-        fetch("https://rentgf-and-bf.onrender.com/api/call-history", {
+        fetch(`${API}/call-history`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -76,8 +127,8 @@ function CallOverlay({ socket, currentUser }) {
             },
             body: JSON.stringify({
                 caller_id: currentUser.id,
-                receiver_id: partner.id,
-                call_type: callType,
+                receiver_id: p.id,
+                call_type: currentType,
                 duration: callDurationRef.current,
                 status: callStatus
             })
@@ -157,11 +208,29 @@ function CallOverlay({ socket, currentUser }) {
             localStreamRef.current.getTracks().forEach(track => track.stop());
             localStreamRef.current = null;
         }
+        setLocalStream(null);
+        if (remoteStreamRef.current) {
+            remoteStreamRef.current.getTracks().forEach(track => track.stop());
+            remoteStreamRef.current = null;
+        }
+        setRemoteStream(null);
         if (peerConnectionRef.current) {
             peerConnectionRef.current.close();
             peerConnectionRef.current = null;
         }
+        if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = null;
+        }
+        if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = null;
+        }
+        if (localVideoRef.current) {
+            localVideoRef.current.srcObject = null;
+        }
         iceQueueRef.current = [];
+        partnerRef.current = null;
+        isCallerRef.current = false;
+        callStateRef.current = "idle";
         setCallState("idle");
         setPartner(null);
         setCallDuration(0);
@@ -175,18 +244,48 @@ function CallOverlay({ socket, currentUser }) {
     // --- WebRTC Peer Setup ---
     const setupWebRTC = async (type, isCaller) => {
         try {
-            const constraints = {
-                audio: true,
-                video: type === 'video' ? { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } : false
-            };
-            const stream = await navigator.mediaDevices.getUserMedia(constraints);
-            localStreamRef.current = stream;
+            // 1. Instant Media Acquisition (reuse pre-warmed stream if active)
+            let stream = localStreamRef.current;
+            const hasValidVideo = stream && stream.getVideoTracks().length > 0 && stream.getVideoTracks()[0].readyState === 'live';
+            const hasValidAudio = stream && stream.getAudioTracks().length > 0 && stream.getAudioTracks()[0].readyState === 'live';
+
+            if (!stream || (type === 'video' && !hasValidVideo) || !hasValidAudio) {
+                if (stream) {
+                    stream.getTracks().forEach(t => t.stop());
+                }
+                const constraints = {
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    },
+                    video: type === 'video' ? {
+                        facingMode: facingMode || 'user',
+                        width: { min: 320, ideal: 640, max: 1280 },
+                        height: { min: 240, ideal: 480, max: 720 },
+                        frameRate: { ideal: 24, max: 30 }
+                    } : false
+                };
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia(constraints);
+                } catch (mediaErr) {
+                    console.warn("Retrying getUserMedia with fallback constraints:", mediaErr);
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        audio: true,
+                        video: type === 'video' ? true : false
+                    });
+                }
+                localStreamRef.current = stream;
+                setLocalStream(stream);
+            }
 
             if (localVideoRef.current && type === 'video') {
                 localVideoRef.current.srcObject = stream;
+                localVideoRef.current.play().catch(() => {});
             }
 
-            const pc = new RTCPeerConnection(ICE_SERVERS);
+            // 2. Direct RTCPeerConnection using pre-loaded high-speed ICE configuration (NO blocking network fetch!)
+            const pc = new RTCPeerConnection(DEFAULT_ICE_SERVERS);
             peerConnectionRef.current = pc;
 
             // Connection state change monitors
@@ -194,13 +293,20 @@ function CallOverlay({ socket, currentUser }) {
                 if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
                     setNetQuality({ status: 'reconnecting', rtt: 0, label: '⚠️ Network Drop - Reconnecting...' });
                 } else if (pc.connectionState === 'connected') {
-                    setNetQuality({ status: 'good', rtt: 30, label: '🟢 HD Quality (Strong Signal)' });
+                    setNetQuality({ status: 'good', rtt: 30, label: '🟢 HD Quality (TURN Relay Active)' });
                 }
             };
 
             pc.oniceconnectionstatechange = () => {
-                if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+                if (pc.iceConnectionState === 'failed') {
+                    setNetQuality({ status: 'reconnecting', rtt: 0, label: '⚠️ Reconnecting NAT Stream...' });
+                    if (pc.restartIce) {
+                        try { pc.restartIce(); } catch (e) {}
+                    }
+                } else if (pc.iceConnectionState === 'disconnected') {
                     setNetQuality({ status: 'reconnecting', rtt: 0, label: '⚠️ Reconnecting Call...' });
+                } else if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+                    setNetQuality({ status: 'good', rtt: 30, label: '🟢 HD Quality (TURN Relay Active)' });
                 }
             };
 
@@ -228,36 +334,75 @@ function CallOverlay({ socket, currentUser }) {
                 }
             }, 3000);
 
+            // Add all tracks to RTCPeerConnection
             stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
+            // Reliable track receiver & stream listener
             pc.ontrack = (event) => {
+                let incomingStream = null;
                 if (event.streams && event.streams[0]) {
-                    if (type === 'video' && remoteVideoRef.current) {
-                        remoteVideoRef.current.srcObject = event.streams[0];
-                    } else if (remoteAudioRef.current) {
-                        remoteAudioRef.current.srcObject = event.streams[0];
+                    incomingStream = event.streams[0];
+                } else if (event.track) {
+                    if (!remoteStreamRef.current) {
+                        remoteStreamRef.current = new MediaStream();
+                    }
+                    if (!remoteStreamRef.current.getTracks().some(t => t.id === event.track.id)) {
+                        remoteStreamRef.current.addTrack(event.track);
+                    }
+                    incomingStream = remoteStreamRef.current;
+                }
+
+                if (incomingStream) {
+                    remoteStreamRef.current = incomingStream;
+                    setRemoteStream(incomingStream);
+
+                    if (remoteVideoRef.current) {
+                        remoteVideoRef.current.srcObject = incomingStream;
+                        remoteVideoRef.current.play().catch(() => {
+                            if (remoteVideoRef.current) {
+                                remoteVideoRef.current.muted = true;
+                                remoteVideoRef.current.play().catch(() => {});
+                            }
+                        });
+                    }
+                    if (remoteAudioRef.current) {
+                        remoteAudioRef.current.srcObject = incomingStream;
+                        remoteAudioRef.current.play().catch(() => {});
                     }
                 }
             };
 
             pc.onicecandidate = (event) => {
-                if (event.candidate && partner && socket) {
+                const p = partnerRef.current || partner;
+                if (event.candidate && p && socket) {
+                    const candData = {
+                        candidate: event.candidate.candidate,
+                        sdpMid: event.candidate.sdpMid,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex,
+                        usernameFragment: event.candidate.usernameFragment
+                    };
                     socket.emit("webrtc_ice_candidate", {
-                        room: partner.room,
-                        candidate: event.candidate,
-                        to: partner.id
+                        room: p.room,
+                        candidate: candData,
+                        to: p.id
                     });
                 }
             };
 
             if (isCaller) {
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                socket.emit("webrtc_offer", {
-                    room: partner.room,
-                    offer: offer,
-                    to: partner.id
+                const p = partnerRef.current || partner;
+                const offer = await pc.createOffer({
+                    offerToReceiveAudio: true,
+                    offerToReceiveVideo: type === 'video'
                 });
+                await pc.setLocalDescription(offer);
+                if (p && socket) {
+                    socket.emit("webrtc_offer", {
+                        room: p.room,
+                        offer: offer,
+                        to: p.id
+                    });
+                }
             }
 
             return pc;
@@ -270,22 +415,52 @@ function CallOverlay({ socket, currentUser }) {
 
     // --- Global Call Event Handler ---
     useEffect(() => {
-        const handleStartCall = (e) => {
+        const handleStartCall = async (e) => {
             const { targetUser, type, room } = e.detail;
             hasLoggedCallRef.current = false;
             callDurationRef.current = 0;
-            setCallType(type);
-            setPartner({
+            isCallerRef.current = true;
+            const p = {
                 id: targetUser.id,
                 name: targetUser.name || 'Companion',
                 pic: targetUser.profile_pic || targetUser.pic || '',
                 room: room
-            });
+            };
+            partnerRef.current = p;
+            callTypeRef.current = type;
+            callStateRef.current = "calling";
+            setCallType(type);
+            setPartner(p);
             setCallState("calling");
             setStatusText("Calling...");
+
+            // Pre-warm camera & mic immediately so it's instantly ready when partner answers
+            try {
+                const constraints = {
+                    audio: { echoCancellation: true, noiseSuppression: true },
+                    video: type === 'video' ? {
+                        facingMode: 'user',
+                        width: { min: 320, ideal: 640, max: 1280 },
+                        height: { min: 240, ideal: 480, max: 720 },
+                        frameRate: { ideal: 24, max: 30 }
+                    } : false
+                };
+                const preStream = await navigator.mediaDevices.getUserMedia(constraints);
+                localStreamRef.current = preStream;
+                setLocalStream(preStream);
+            } catch (err) {
+                console.warn("Pre-warm media stream warning:", err);
+            }
+
+            // Ensure global socket joins room
+            if (socket && room) {
+                socket.emit("join_room", room);
+            }
+
             socket.emit("initiate_call", {
                 room: room,
                 receiver_id: targetUser.id,
+                to: targetUser.id,
                 type: type,
                 caller_name: currentUser?.name || 'User',
                 caller_pic: currentUser?.profile_pic || '',
@@ -313,19 +488,30 @@ function CallOverlay({ socket, currentUser }) {
             // Ignore if I am the caller!
             if (currentUser && data.caller_user_id && String(data.caller_user_id) === String(currentUser.id)) return;
             if (data.caller_id === socket.id) return;
-            if (callState !== "idle") return; // Busy
+            if (callStateRef.current !== "idle") return; // Busy
             hasLoggedCallRef.current = false;
             callDurationRef.current = 0;
-            setCallType(data.type || "video");
-            setPartner({
+            isCallerRef.current = false;
+            const callTypeVal = data.type || "video";
+            const p = {
                 id: data.caller_user_id || data.caller_id,
                 name: data.caller_name || "Incoming Caller",
                 pic: data.caller_pic || "",
                 room: data.room
-            });
+            };
+            partnerRef.current = p;
+            callTypeRef.current = callTypeVal;
+            callStateRef.current = "receiving";
+            setCallType(callTypeVal);
+            setPartner(p);
             setCallState("receiving");
             setShowBanner(true);
             startRingtone();
+
+            // Ensure global socket joins room for incoming call
+            if (data.room) {
+                socket.emit("join_room", data.room);
+            }
         };
 
         const handleCallStatusUpdate = (data) => {
@@ -336,24 +522,30 @@ function CallOverlay({ socket, currentUser }) {
 
         const handleCallAccepted = async () => {
             stopRingtone();
-            if (callingTimeoutRef.current) clearTimeout(callingTimeoutRef.current);
+            if (callingTimeoutRef.current) {
+                clearTimeout(callingTimeoutRef.current);
+                callingTimeoutRef.current = null;
+            }
             hasLoggedCallRef.current = false;
             callDurationRef.current = 0;
+            callStateRef.current = "active";
             setCallState("active");
             setCallDuration(0);
+            if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
             timerIntervalRef.current = setInterval(() => {
                 setCallDuration(prev => {
                     callDurationRef.current = prev + 1;
                     return prev + 1;
                 });
             }, 1000);
-            if (partner) {
-                await setupWebRTC(callType, true);
-            }
+
+            const type = callTypeRef.current || "video";
+            await setupWebRTC(type, true);
         };
 
         const handleCallRejected = () => {
-            logCallHistory(`📞 Missed ${callType === 'video' ? 'Video' : 'Voice'} Call`);
+            const currentType = callTypeRef.current || callType;
+            logCallHistory(`📞 Missed ${currentType === 'video' ? 'Video' : 'Voice'} Call`);
             cleanupCall();
         };
 
@@ -362,41 +554,74 @@ function CallOverlay({ socket, currentUser }) {
             cleanupCall();
         };
 
-        const handleWebrtcOffer = async (offer) => {
+        const handleWebrtcOffer = async (data) => {
+            const offer = data?.offer || data;
+            if (!offer || !offer.sdp) return;
+            const type = callTypeRef.current || callType;
+            const p = partnerRef.current || partner;
+
             if (!peerConnectionRef.current) {
-                await setupWebRTC(callType, false);
+                await setupWebRTC(type, false);
             }
             const pc = peerConnectionRef.current;
-            if (pc) {
-                await pc.setRemoteDescription(new RTCSessionDescription(offer));
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                socket.emit("webrtc_answer", { room: partner.room, answer: answer, to: partner.id });
+            if (pc && offer) {
+                try {
+                    if (pc.signalingState !== "stable" && pc.signalingState !== "have-local-offer") {
+                        console.warn("Ignoring offer because signalingState is:", pc.signalingState);
+                        return;
+                    }
+                    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    if (p && socket) {
+                        socket.emit("webrtc_answer", { room: p.room, answer: answer, to: p.id });
+                    }
 
-                while (iceQueueRef.current.length > 0) {
-                    const candidate = iceQueueRef.current.shift();
-                    try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (e) { }
+                    while (iceQueueRef.current.length > 0) {
+                        const rawCand = iceQueueRef.current.shift();
+                        const parsed = extractIceCandidate(rawCand);
+                        if (parsed) {
+                            try { await pc.addIceCandidate(new RTCIceCandidate(parsed)); } catch (e) { }
+                        }
+                    }
+                } catch (err) {
+                    console.error("handleWebrtcOffer error:", err);
                 }
             }
         };
 
-        const handleWebrtcAnswer = async (answer) => {
+        const handleWebrtcAnswer = async (data) => {
+            const answer = data?.answer || data;
+            if (!answer || !answer.sdp) return;
             const pc = peerConnectionRef.current;
-            if (pc && pc.signalingState === "have-local-offer") {
-                await pc.setRemoteDescription(new RTCSessionDescription(answer));
-                while (iceQueueRef.current.length > 0) {
-                    const candidate = iceQueueRef.current.shift();
-                    try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (e) { }
+            if (pc && answer && pc.signalingState === "have-local-offer") {
+                try {
+                    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+                    while (iceQueueRef.current.length > 0) {
+                        const rawCand = iceQueueRef.current.shift();
+                        const parsed = extractIceCandidate(rawCand);
+                        if (parsed) {
+                            try { await pc.addIceCandidate(new RTCIceCandidate(parsed)); } catch (e) { }
+                        }
+                    }
+                } catch (err) {
+                    console.error("handleWebrtcAnswer error:", err);
                 }
             }
         };
 
-        const handleWebrtcIceCandidate = async (candidate) => {
+        const handleWebrtcIceCandidate = async (data) => {
+            const parsed = extractIceCandidate(data);
+            if (!parsed) return;
             const pc = peerConnectionRef.current;
             if (pc && pc.remoteDescription && pc.remoteDescription.type) {
-                try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (e) { }
+                try {
+                    await pc.addIceCandidate(new RTCIceCandidate(parsed));
+                } catch (e) {
+                    console.warn("addIceCandidate error:", e);
+                }
             } else {
-                iceQueueRef.current.push(candidate);
+                iceQueueRef.current.push(parsed);
             }
         };
 
@@ -419,38 +644,90 @@ function CallOverlay({ socket, currentUser }) {
             socket.off("webrtc_answer", handleWebrtcAnswer);
             socket.off("webrtc_ice_candidate", handleWebrtcIceCandidate);
         };
-    }, [socket, callState, callType, partner]);
+    }, [socket, currentUser]);
+
+    // Stream re-attachment when active call screen mounts or streams change
+    useEffect(() => {
+        const stream = localStream || localStreamRef.current;
+        if (callState === 'active' && stream && localVideoRef.current) {
+            if (localVideoRef.current.srcObject !== stream) {
+                localVideoRef.current.srcObject = stream;
+            }
+            localVideoRef.current.play().catch(() => {});
+        }
+    }, [localStream, callState]);
+
+    useEffect(() => {
+        const stream = remoteStream || remoteStreamRef.current;
+        if (callState === 'active' && stream) {
+            if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== stream) {
+                remoteVideoRef.current.srcObject = stream;
+            }
+            if (remoteVideoRef.current) {
+                remoteVideoRef.current.play().catch(() => {
+                    if (remoteVideoRef.current) {
+                        remoteVideoRef.current.muted = true;
+                        remoteVideoRef.current.play().catch(() => {});
+                    }
+                });
+            }
+            if (remoteAudioRef.current && remoteAudioRef.current.srcObject !== stream) {
+                remoteAudioRef.current.srcObject = stream;
+            }
+            if (remoteAudioRef.current) {
+                remoteAudioRef.current.play().catch(() => {});
+            }
+        }
+    }, [remoteStream, callState]);
 
     // --- User Actions ---
     const acceptCall = async () => {
         stopRingtone();
-        if (callingTimeoutRef.current) clearTimeout(callingTimeoutRef.current);
+        if (callingTimeoutRef.current) {
+            clearTimeout(callingTimeoutRef.current);
+            callingTimeoutRef.current = null;
+        }
         hasLoggedCallRef.current = false;
         callDurationRef.current = 0;
+        callStateRef.current = "active";
         setCallState("active");
         setCallDuration(0);
+        if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
         timerIntervalRef.current = setInterval(() => {
             setCallDuration(prev => {
                 callDurationRef.current = prev + 1;
                 return prev + 1;
             });
         }, 1000);
-        await setupWebRTC(callType, false);
-        socket.emit("accept_call", { room: partner.room, to: partner.id });
+
+        const p = partnerRef.current || partner;
+        const currentType = callTypeRef.current || callType;
+
+        if (p?.room && socket) {
+            socket.emit("join_room", p.room);
+        }
+
+        await setupWebRTC(currentType, false);
+        if (p && socket) {
+            socket.emit("accept_call", { room: p.room, to: p.id });
+        }
     };
 
     const rejectCall = () => {
-        logCallHistory(`📞 Missed ${callType === 'video' ? 'Video' : 'Voice'} Call`);
-        if (partner && socket) {
-            socket.emit("reject_call", { room: partner.room, to: partner.id });
+        const p = partnerRef.current || partner;
+        const currentType = callTypeRef.current || callType;
+        logCallHistory(`📞 Missed ${currentType === 'video' ? 'Video' : 'Voice'} Call`);
+        if (p && socket) {
+            socket.emit("reject_call", { room: p.room, to: p.id });
         }
         cleanupCall();
     };
 
     const endCall = () => {
+        const p = partnerRef.current || partner;
         logCallHistory();
-        if (partner && socket) {
-            socket.emit("end_call", { room: partner.room, to: partner.id });
+        if (p && socket) {
+            socket.emit("end_call", { room: p.room, to: p.id });
         }
         cleanupCall();
     };
@@ -554,7 +831,7 @@ function CallOverlay({ socket, currentUser }) {
             {/* ── FULL SCREEN CALL MODAL ── */}
             <div className="fixed inset-0 z-[9999] bg-black/95 backdrop-blur-xl flex flex-col justify-between overflow-hidden animate-fade-in">
                 {/* Hidden Audio Element for Voice Calls */}
-                <audio ref={remoteAudioRef} autoPlay />
+                <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: 'none' }} />
 
                 {/* Top Bar / Caller Header */}
                 <div className="pt-10 px-6 flex flex-col items-center z-20 text-center">
@@ -591,6 +868,7 @@ function CallOverlay({ socket, currentUser }) {
                                 ref={remoteVideoRef}
                                 autoPlay
                                 playsInline
+                                muted
                                 className="w-full h-full object-cover"
                             />
 

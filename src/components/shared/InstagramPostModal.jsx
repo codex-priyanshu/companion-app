@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef } from "react";
 import { FiHeart, FiMessageCircle, FiX, FiTrash2, FiSend, FiMoreVertical, FiShare2, FiInfo, FiChevronLeft, FiChevronRight, FiMapPin } from "react-icons/fi";
 import { FaHeart } from "react-icons/fa";
 
+const API_BASE = process.env.REACT_APP_API_URL || "https://rentgf-and-bf.onrender.com";
+const API = `${API_BASE}/api`;
+
 function InstagramPostModal({ posts = [], initialPostId, postOwner, currentUser, onClose, onDelete }) {
     // Current active post ID (used for Desktop navigation)
     const [activePostId, setActivePostId] = useState(initialPostId);
@@ -29,7 +32,7 @@ function InstagramPostModal({ posts = [], initialPostId, postOwner, currentUser,
         try {
             const headers = {};
             if (token) headers["Authorization"] = `Bearer ${token}`;
-            const res = await fetch(`https://rentgf-and-bf.onrender.com/api/posts/detail/${postId}`, { headers });
+            const res = await fetch(`${API}/posts/detail/${postId}`, { headers });
             if (res.ok) {
                 const data = await res.json();
                 setPostsDetails(prev => ({ ...prev, [postId]: data }));
@@ -42,7 +45,7 @@ function InstagramPostModal({ posts = [], initialPostId, postOwner, currentUser,
     const loadPostComments = async (postId) => {
         if (!postId || commentsMap[postId]) return;
         try {
-            const res = await fetch(`https://rentgf-and-bf.onrender.com/api/comments/${postId}`);
+            const res = await fetch(`${API}/comments/${postId}`);
             if (res.ok) {
                 const data = await res.json();
                 setCommentsMap(prev => ({ ...prev, [postId]: data }));
@@ -86,7 +89,7 @@ function InstagramPostModal({ posts = [], initialPostId, postOwner, currentUser,
         }
 
         try {
-            const res = await fetch("https://rentgf-and-bf.onrender.com/api/like", {
+            const res = await fetch(`${API}/like`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -128,7 +131,7 @@ function InstagramPostModal({ posts = [], initialPostId, postOwner, currentUser,
         if (!commentText.trim()) return;
 
         try {
-            const res = await fetch("https://rentgf-and-bf.onrender.com/api/comment", {
+            const res = await fetch(`${API}/comment`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -170,9 +173,9 @@ function InstagramPostModal({ posts = [], initialPostId, postOwner, currentUser,
 
     // Delete post helper
     const handleDeletePost = async (postId) => {
-        if (!await window.showConfirm("Are you sure you want to delete this photo?")) return;
+        if (!window.confirm("Are you sure you want to delete this photo?")) return;
         try {
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/posts/${postId}`, {
+            const response = await fetch(`${API}/posts/${postId}`, {
                 method: "DELETE",
                 headers: { "Authorization": `Bearer ${token}` }
             });

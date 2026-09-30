@@ -1,0 +1,16 @@
+{
+  "version": "0.0.6",
+  "versionCode": 8,
+  "releaseTitle": "Coffeely v0.0.6 (Beta) — YouTube & Instagram Shimmer Skeleton Loaders",
+  "releaseNotes": [
+    "✨ YouTube & Instagram Shimmer Wave: Premium animated skeleton loading states across the entire app",
+    "🔍 Find & Discover Grid: High-fidelity card skeletons with rounded thumbnails, avatars, and lines",
+    "📸 Home Feed & Details: Instagram-style card and 3x3 photo grid shimmer placeholders",
+    "💬 Message Inbox & Calls: Replaced text spinners with sleek avatar and message bar skeletons",
+    "🔔 Activity Notifications: Shimmer skeleton list during background sync"
+  ],
+  "mandatory": false,
+  "apkDownloadUrl": "https://github.com/Priyanshu-kumar-maurya/companion-app/releases/latest/download/coffeely.apk",
+  "webUrl": "https://coffeely-app.vercel.app",
+  "releaseDate": "September 2026"
+}

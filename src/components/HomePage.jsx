@@ -1,11 +1,18 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { PAGES } from "../App";
 import Footer from "./Footer";
+import StoriesBar from "./shared/StoriesBar";
+import VerifiedBadge from "./shared/VerifiedBadge";
+import { FeedPostSkeleton, CompanionGridSkeleton } from "./shared/SkeletonLoaders";
 import { AiFillHeart, AiOutlineHeart } from "react-icons/ai";
 import { FaRegComment, FaInbox } from "react-icons/fa";
 import { RiShareForwardLine, RiLoader4Line } from "react-icons/ri";
 import { BsBookmarkFill, BsBookmark } from "react-icons/bs";
 import { FiWifi, FiBattery, FiMic, FiMicOff, FiPhoneOff, FiVideoOff, FiShield, FiCheckCircle, FiStar, FiClock } from "react-icons/fi";
+
+// Backend API Base Configuration
+const API_BASE = process.env.REACT_APP_API_URL || "https://rentgf-and-bf.onrender.com";
+const API = `${API_BASE}/api`;
 
 const DEFAULT_FEATURED_COMPANIONS = [
     {
@@ -120,7 +127,13 @@ const DEFAULT_FEATURED_COMPANIONS = [
 
 function HomePage({ setPage, currentUser, setSelectedGirl }) {
     const [feed, setFeed] = useState([]);
-    const [stats, setStats] = useState({ total: 27, girls: 12, boys: 15, connections: 450 });
+    const [stats, setStats] = useState(() => {
+        const cached = sessionStorage.getItem("homeStatsCache");
+        if (cached) {
+            try { return JSON.parse(cached); } catch (e) {}
+        }
+        return { total: 0, girls: 0, boys: 0, connections: 0 };
+    });
     const [loading, setLoading] = useState(false);
     const [followingState, setFollowingState] = useState({});
     const [commentModal, setCommentModal] = useState({ isOpen: false, postId: null, comments: [] });
@@ -172,7 +185,7 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
         const fetchData = async () => {
             try {
                 if (isLoggedIn && currentUser) {
-                    const response = await fetch(`https://rentgf-and-bf.onrender.com/api/feed?currentUserId=${currentUser.id}`);
+                    const response = await fetch(`${API}/feed?currentUserId=${currentUser.id}`);
                     if (response.ok) {
                         const data = await response.json();
                         setFeed(data);
@@ -188,7 +201,7 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
 
                     // Fetch saved post IDs
                     const token = localStorage.getItem("token");
-                    const savedRes = await fetch("https://rentgf-and-bf.onrender.com/api/posts/saved", {
+                    const savedRes = await fetch(`${API}/posts/saved`, {
                         headers: { "Authorization": `Bearer ${token}` }
                     });
                     if (savedRes.ok) {
@@ -196,7 +209,7 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                         setSavedPosts(savedData.map(p => p.id));
                     }
                 } else {
-                    const res = await fetch("https://rentgf-and-bf.onrender.com/api/users");
+                    const res = await fetch(`${API}/users`);
                     if (res.ok) {
                         const allUsers = await res.json();
                         if (allUsers && allUsers.length > 0) {
@@ -204,10 +217,10 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                             const boys = allUsers.filter(u => u.role === 'boy' || u.role === 'admin');
 
                             const newStats = {
-                                girls: girls.length || 12,
-                                boys: boys.length || 15,
-                                total: allUsers.length || 27,
-                                connections: (allUsers.length || 27) * 15 + 120
+                                girls: girls.length,
+                                boys: boys.length,
+                                total: allUsers.length,
+                                connections: allUsers.length * 15 + 120
                             };
 
                             setStats(newStats);
@@ -286,12 +299,13 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
     const handleLike = async (postId, isLikedByMe) => {
         if (!currentUser) return;
 
+        // Optimistically update UI
         setFeed(prevFeed => prevFeed.map(post => {
             if (post.id === postId) {
                 return {
                     ...post,
                     is_liked_by_me: !isLikedByMe,
-                    total_likes: isLikedByMe ? parseInt(post.total_likes) - 1 : parseInt(post.total_likes) + 1
+                    total_likes: isLikedByMe ? Math.max(0, parseInt(post.total_likes) - 1) : parseInt(post.total_likes) + 1
                 };
             }
             return post;
@@ -299,7 +313,7 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
 
         try {
             const token = localStorage.getItem("token");
-            await fetch("https://rentgf-and-bf.onrender.com/api/like", {
+            const res = await fetch(`${API}/like`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -307,8 +321,32 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                 },
                 body: JSON.stringify({ post_id: postId })
             });
+            if (!res.ok) {
+                // Revert optimistic update on server error
+                setFeed(prevFeed => prevFeed.map(post => {
+                    if (post.id === postId) {
+                        return {
+                            ...post,
+                            is_liked_by_me: isLikedByMe,
+                            total_likes: isLikedByMe ? parseInt(post.total_likes) + 1 : Math.max(0, parseInt(post.total_likes) - 1)
+                        };
+                    }
+                    return post;
+                }));
+            }
         } catch (err) {
-            console.error(err);
+            console.error("Like error:", err);
+            // Revert optimistic update on network error
+            setFeed(prevFeed => prevFeed.map(post => {
+                if (post.id === postId) {
+                    return {
+                        ...post,
+                        is_liked_by_me: isLikedByMe,
+                        total_likes: isLikedByMe ? parseInt(post.total_likes) + 1 : Math.max(0, parseInt(post.total_likes) - 1)
+                    };
+                }
+                return post;
+            }));
         }
     };
 
@@ -331,7 +369,7 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
 
         try {
             const token = localStorage.getItem("token");
-            await fetch(`https://rentgf-and-bf.onrender.com${endpoint}`, {
+            const res = await fetch(`${API_BASE}${endpoint}`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -342,12 +380,18 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                     following_id: targetUserId
                 })
             });
+            if (!res.ok) {
+                setFollowingState(prev => ({
+                    ...prev,
+                    [targetUserId]: isCurrentlyFollowing
+                }));
+            }
         } catch (err) {
             setFollowingState(prev => ({
                 ...prev,
                 [targetUserId]: isCurrentlyFollowing
             }));
-            console.error(err);
+            console.error("Follow error:", err);
         }
     };
 
@@ -355,13 +399,13 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
         setCommentModal({ isOpen: true, postId, comments: [] });
         setLoadingComments(true);
         try {
-            const res = await fetch(`https://rentgf-and-bf.onrender.com/api/comments/${postId}`);
+            const res = await fetch(`${API}/comments/${postId}`);
             if (res.ok) {
                 const data = await res.json();
                 setCommentModal({ isOpen: true, postId, comments: data });
             }
         } catch (err) {
-            console.error(err);
+            console.error("Fetch comments error:", err);
         } finally {
             setLoadingComments(false);
         }
@@ -372,12 +416,12 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
 
         const commentData = {
             post_id: commentModal.postId,
-            text: newComment
+            text: newComment.trim()
         };
 
         try {
             const token = localStorage.getItem("token");
-            const res = await fetch("https://rentgf-and-bf.onrender.com/api/comment", {
+            const res = await fetch(`${API}/comment`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -401,7 +445,7 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                 ));
             }
         } catch (err) {
-            console.error(err);
+            console.error("Submit comment error:", err);
         }
     };
 
@@ -415,7 +459,7 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
 
         try {
             const token = localStorage.getItem("token");
-            await fetch("https://rentgf-and-bf.onrender.com/api/posts/save", {
+            const res = await fetch(`${API}/posts/save`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -423,6 +467,14 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                 },
                 body: JSON.stringify({ post_id: postId })
             });
+            if (!res.ok) {
+                // Revert on error
+                if (isSaved) {
+                    setSavedPosts(prev => [...prev, postId]);
+                } else {
+                    setSavedPosts(prev => prev.filter(id => id !== postId));
+                }
+            }
         } catch (err) {
             console.error("Save toggle error:", err);
             if (isSaved) {
@@ -479,14 +531,52 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
         return `${diffDays}d`;
     };
 
+    // ─── Instagram-Style Swipe Gestures: Swipe Left to Open Direct Messages ───
+    const touchStartX = useRef(null);
+    const touchStartY = useRef(null);
+
+    const handleTouchStart = (e) => {
+        if (!e.touches || e.touches.length === 0) return;
+        touchStartX.current = e.touches[0].clientX;
+        touchStartY.current = e.touches[0].clientY;
+    };
+
+    const handleTouchEnd = (e) => {
+        if (touchStartX.current === null || touchStartY.current === null) return;
+        if (!e.changedTouches || e.changedTouches.length === 0) return;
+
+        const diffX = touchStartX.current - e.changedTouches[0].clientX;
+        const diffY = touchStartY.current - e.changedTouches[0].clientY;
+
+        touchStartX.current = null;
+        touchStartY.current = null;
+
+        // Ignore touches inside interactive elements
+        if (e.target && e.target.closest('button, input, textarea, a, select, [data-prevent-swipe]')) {
+            return;
+        }
+
+        // Swipe Left (from right to left) -> open Direct Messages
+        if (diffX > 75 && Math.abs(diffX) > Math.abs(diffY) * 1.4) {
+            if (currentUser && typeof setPage === 'function') {
+                setPage(PAGES.MESSAGES);
+            }
+        }
+    };
+
     if (isLoggedIn) {
         return (
-            <div className="min-h-[100dvh] bg-black pt-20 pb-20 flex justify-center">
+            <div 
+                className="min-h-[100dvh] bg-black pt-20 pb-20 flex justify-center"
+                onTouchStart={handleTouchStart}
+                onTouchEnd={handleTouchEnd}
+            >
                 <div className="w-full max-w-lg flex flex-col gap-6 px-4">
+                    {/* 📸 24-Hour Ephemeral Stories Bar */}
+                    <StoriesBar currentUser={currentUser} />
+
                     {loading ? (
-                        <div className="flex justify-center items-center h-64">
-                            <RiLoader4Line className="text-[#e1306c] text-5xl animate-spin" />
-                        </div>
+                        <FeedPostSkeleton count={3} />
                     ) : feed.length === 0 ? (
                         <div className="text-center py-20 bg-[#121212] rounded-2xl border border-[#262626]/80">
                             <FaInbox className="text-5xl text-gray-500 mx-auto mb-4" />
@@ -655,8 +745,8 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                 {/* Two Column Layout: Left (Phone Mockup) | Right (Login/Signup Box) */}
                 <div className="flex flex-col lg:flex-row items-center justify-center gap-12 lg:gap-20 relative z-10 w-full">
                     
-                    {/* LEFT COLUMN: Phone Mockup */}
-                    <div className="shrink-0 scale-90 sm:scale-100 flex justify-center order-2 lg:order-1">
+                    {/* LEFT COLUMN: Phone Mockup (Visible on large screens, hidden on mobile for clean UX) */}
+                    <div className="shrink-0 scale-90 sm:scale-100 hidden lg:flex justify-center order-2 lg:order-1">
                         <div className="relative w-[280px] h-[550px] bg-black rounded-[45px] p-[10px] shadow-[0_25px_60px_-15px_rgba(0,0,0,0.9)] border-[6px] border-[#262626] overflow-hidden">
                             {/* Notch */}
                             <div className="absolute top-3 left-1/2 -translate-x-1/2 w-28 h-4 bg-black rounded-full z-30 flex items-center justify-center">
@@ -695,7 +785,7 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                                                 <div className="bg-[#121212]/90 backdrop-blur-md p-3 relative z-10 border-t border-[#262626]">
                                                     <div className="flex items-center gap-1.5 mb-0.5">
                                                         <span className="font-extrabold text-[12px] text-white">Ananya, 21</span>
-                                                        <span className="bg-[#0095f6] text-white text-[7px] px-1.5 py-0.5 rounded-full font-bold">VERIFIED</span>
+                                                        <VerifiedBadge size="xs" />
                                                     </div>
                                                     <p className="text-[9px] text-gray-300 flex items-center gap-1">
                                                         Mumbai • <span className="w-1.5 h-1.5 bg-green-500 rounded-full inline-block animate-pulse"></span> Online
@@ -798,20 +888,24 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                     </div>
  
                     {/* RIGHT COLUMN: Premium Card */}
-                    <div className="w-full max-w-[360px] flex flex-col gap-4 animate-fade-in order-1 lg:order-2">
-                        <div className="bg-[#121212]/95 border border-[#262626] rounded-3xl p-6 md:p-8 backdrop-blur-md relative overflow-hidden flex flex-col items-center shadow-xl">
+                    <div className="w-full max-w-[380px] sm:max-w-md flex flex-col gap-4 animate-fade-in order-1 lg:order-2">
+                        <div className="bg-[#121212]/95 border border-[#262626] rounded-3xl p-6 sm:p-8 backdrop-blur-md relative overflow-hidden flex flex-col items-center shadow-xl">
                             
                             {/* Ambient card glows */}
                             <div className="absolute -top-12 -right-12 w-24 h-24 bg-[#0095f6]/10 rounded-full blur-xl pointer-events-none"></div>
                             
                             {/* Platform Branding */}
                             <div className="flex items-center gap-2.5 mb-6">
-                                <svg className="w-9 h-9 text-[#0095f6]" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                    <path d="M49.9999 15L23.157 30.5V61.5L49.9999 77L76.8428 61.5V30.5L49.9999 15Z" stroke="#0095f6" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-                                    <path d="M49.9999 35L36.1436 43V59L49.9999 67L63.8563 59V43L49.9999 35Z" stroke="#0095f6" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-                                    <path d="M23 30.5L50 50M77 30.5L50 50M50 77V50" stroke="#0095f6" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
+                                <svg className="w-10 h-10 drop-shadow-[0_0_8px_rgba(225,48,108,0.4)]" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M22 40H68C68 40 69 68 45 68C21 68 22 40 22 40Z" stroke="url(#home-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+                                    <path d="M68 45H75C80 45 83 48 83 53C83 58 80 61 75 61H66" stroke="url(#home-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+                                    <path d="M18 75H72" stroke="url(#home-grad)" strokeWidth="6" strokeLinecap="round"/>
+                                    <path d="M45 29C40 23 32 30 39 37L45 42L51 37C58 30 50 23 45 29Z" fill="url(#home-grad)"/>
+                                    <path d="M31 27C30 24 31 21 33 19" stroke="url(#home-grad)" strokeWidth="4" strokeLinecap="round"/>
+                                    <path d="M59 27C60 24 59 21 57 19" stroke="url(#home-grad)" strokeWidth="4" strokeLinecap="round"/>
+                                    <defs><linearGradient id="home-grad" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse"><stop stopColor="#f9ce3f" /><stop offset="0.5" stopColor="#e1306c" /><stop offset="1" stopColor="#833ab4" /></linearGradient></defs>
                                 </svg>
-                                <span className="text-3xl font-black text-white tracking-wide">Coffeely</span>
+                                <span className="text-3xl font-black bg-gradient-to-r from-[#f9ce3f] via-[#e1306c] to-[#833ab4] bg-clip-text text-transparent tracking-wide">Coffeely</span>
                             </div>
  
                             {/* Short Intro */}
@@ -820,7 +914,7 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                             </p>
  
                             {/* Login / Signup Buttons */}
-                            <div className="w-full flex flex-col gap-4">
+                            <div className="w-full flex flex-col gap-3.5">
                                 <button
                                     onClick={() => setPage(PAGES.BOY_LOGIN)}
                                     className="w-full py-3.5 rounded-xl font-bold bg-[#0095f6] hover:bg-[#1877f2] text-sm text-white shadow-lg shadow-[#0095f6]/20 transition transform hover:-translate-y-0.5 active:scale-95"
@@ -833,6 +927,13 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                                     className="w-full py-3.5 bg-[#262626] hover:bg-[#363636] text-white border border-[#363636] rounded-xl font-bold transition-all transform hover:-translate-y-0.5 active:scale-95 text-sm"
                                 >
                                     Create New Account
+                                </button>
+
+                                <button
+                                    onClick={() => setPage(PAGES.FIND)}
+                                    className="w-full py-2.5 bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 rounded-xl font-medium transition-all text-xs flex items-center justify-center gap-2"
+                                >
+                                    <span>🔍 Browse Companions First</span>
                                 </button>
                             </div>
  
@@ -901,8 +1002,9 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                                         <FiStar size={11} className="fill-yellow-400" /> {comp.rating}
                                     </div>
                                     {comp.kyc_status === 'verified' && (
-                                        <span className="absolute bottom-3 left-3 bg-[#0095f6] text-white text-[9px] px-2.5 py-0.5 rounded-full font-bold tracking-wider uppercase shadow-md flex items-center gap-1 border border-[#0095f6]/20">
-                                            <FiCheckCircle size={10} /> Verified
+                                        <span className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-md text-white text-[10px] pl-1.5 pr-2.5 py-0.5 rounded-full font-bold shadow-md flex items-center gap-1.5 border border-white/15">
+                                            <VerifiedBadge size="xs" />
+                                            <span>Verified</span>
                                         </span>
                                     )}
                                 </div>
@@ -952,8 +1054,13 @@ function HomePage({ setPage, currentUser, setSelectedGirl }) {
                 </div>
  
                 {loading ? (
-                    <div className="flex justify-center items-center py-10">
-                        <RiLoader4Line className="text-[#0095f6] text-4xl animate-spin" />
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 animate-pulse">
+                        {[1, 2, 3, 4].map(i => (
+                            <div key={i} className="bg-[#121212] border border-white/5 rounded-2xl p-6 text-center skeleton-shimmer">
+                                <div className="h-9 w-20 bg-white/10 rounded-lg mx-auto mb-2.5 skeleton-shimmer" />
+                                <div className="h-3 w-28 bg-white/5 rounded-md mx-auto skeleton-shimmer" />
+                            </div>
+                        ))}
                     </div>
                 ) : (
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

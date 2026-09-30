@@ -1,0 +1,17 @@
+{
+  "version": "2.4.5",
+  "versionCode": 6,
+  "releaseTitle": "Coffeely v2.4.5 — Pre-Login Mobile UX & Responsive Redesign",
+  "releaseNotes": [
+    "📱 Zero Navbar Squashing: Clean dedicated mobile login and registration views",
+    "🔙 Fast Home Return: Instant '← Back to Home' button on Auth pages",
+    "🎯 Mobile Streamlined Hero: Instant access to Coffeely actions without oversized mockups",
+    "🎂 Native Date Selection: Responsive wheels for Day, Month, and Year on mobile",
+    "👤 Flexible Registration: Single name support and auto-formatted 10-digit phone input",
+    "✨ Professional Modals: Native-style 'Sign In to Connect' bottom sheet replacing browser alerts"
+  ],
+  "mandatory": false,
+  "apkDownloadUrl": "https://github.com/Priyanshu-kumar-maurya/companion-app/releases/latest/download/coffeely.apk",
+  "webUrl": "https://coffeely-app.vercel.app",
+  "releaseDate": "September 2026"
+}

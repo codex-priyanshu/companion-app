@@ -1,4 +1,5 @@
 import React from "react";
+import { APP_VERSION_TAG, APP_RELEASE_STAGE, APP_BUILD_DATE } from "../config/version";
 
 function AboutPage() {
     return (
@@ -15,6 +16,10 @@ function AboutPage() {
                     designed for people who want genuine, meaningful company — whether for
                     a coffee date, movie night, shopping trip, or just a good conversation.
                 </p>
+                <div className="mt-6 inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 text-xs font-mono shadow-sm">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span>Coffeely {APP_VERSION_TAG} • {APP_RELEASE_STAGE} ({APP_BUILD_DATE})</span>
+                </div>
             </div>
 
             <div className="max-w-5xl mx-auto px-6 pb-16">
@@ -58,7 +63,11 @@ function AboutPage() {
 
             <footer className="border-t border-white/5 py-10 text-center text-gray-500 text-sm">
                 <p>💞 Coffeely — Safe, Verified & Respectful Companionship</p>
-                <p className="mt-2 text-xs">© 2026 Coffeely. All rights reserved.</p>
+                <div className="mt-2 text-xs flex items-center justify-center gap-2 text-gray-500">
+                    <span>© 2026 Coffeely. All rights reserved.</span>
+                    <span>•</span>
+                    <span className="text-emerald-400 font-mono font-semibold">{APP_VERSION_TAG} (Latest)</span>
+                </div>
             </footer>
         </div>
     );

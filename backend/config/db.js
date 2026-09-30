@@ -18,7 +18,12 @@ if (connectionString) {
 
 const pool = new Pool({
     connectionString,
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false },
+    max: parseInt(process.env.DB_POOL_MAX || '25', 10),
+    min: parseInt(process.env.DB_POOL_MIN || '2', 10),
+    idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT_MS || '30000', 10),
+    connectionTimeoutMillis: parseInt(process.env.DB_CONN_TIMEOUT_MS || '8000', 10),
+    allowExitOnIdle: false
 });
 
 pool.on('error', (err) => {
@@ -37,6 +42,7 @@ const connectDB = async () => {
         await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS longitude DECIMAL(11, 8);");
         await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT;");
         await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_url TEXT;");
+        await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reaction VARCHAR(20);");
         await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS kyc_status VARCHAR(20) DEFAULT 'unverified';");
         await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS id_proof_url TEXT;");
         await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_for INTEGER[] DEFAULT '{}';");
@@ -51,6 +57,7 @@ const connectDB = async () => {
         await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_platform_blocked BOOLEAN DEFAULT false;");
         await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;");
         await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS dob VARCHAR(20);");
+        await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER;");
         await pool.query("ALTER TABLE posts ADD COLUMN IF NOT EXISTS show_on_feed BOOLEAN DEFAULT true;");
         await pool.query("ALTER TABLE posts ADD COLUMN IF NOT EXISTS show_on_profile BOOLEAN DEFAULT true;");
         await pool.query("ALTER TABLE posts ADD COLUMN IF NOT EXISTS followers_only BOOLEAN DEFAULT false;");
@@ -63,6 +70,23 @@ const connectDB = async () => {
         await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_by VARCHAR(10);");
         await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_status VARCHAR(20) DEFAULT 'none';");
         await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS time_slot VARCHAR(50);");
+        await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_status VARCHAR(50) DEFAULT 'unpaid';");
+        await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_id VARCHAR(100);");
+        await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS order_id VARCHAR(100);");
+        await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50) DEFAULT 'upi';");
+        await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS platform_fee DECIMAL(10, 2) DEFAULT 0;");
+        await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS companion_earnings DECIMAL(10, 2) DEFAULT 0;");
+        await pool.query("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL;");
+        await pool.query("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS compliment_tags TEXT[];");
+        await pool.query("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS is_verified_booking BOOLEAN DEFAULT true;");
+        await pool.query("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS helpful_count INTEGER DEFAULT 0;");
+        
+        // --- Security & Account Lockout Columns ---
+        await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER DEFAULT 0;");
+        await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP;");
+        await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_otp_attempts INTEGER DEFAULT 0;");
+        await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ip VARCHAR(60);");
+        await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;");
         
         // --- Username Column Migration & Unique Constraint ---
         await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(50);");
@@ -85,6 +109,9 @@ const connectDB = async () => {
             await pool.query("UPDATE users SET username = $1 WHERE id = $2;", [tempUsername, u.id]);
         }
         await pool.query("ALTER TABLE users ADD CONSTRAINT unique_username UNIQUE (username);").catch(() => {});
+        await pool.query("UPDATE users SET is_verified = true WHERE is_verified IS NULL;").catch(() => {});
+        await pool.query("UPDATE users SET is_frozen = false WHERE is_frozen IS NULL;").catch(() => {});
+        await pool.query("UPDATE users SET is_platform_blocked = false WHERE is_platform_blocked IS NULL;").catch(() => {});
 
         // Saved posts table
         await pool.query(`CREATE TABLE IF NOT EXISTS saved_posts (
@@ -212,12 +239,72 @@ const connectDB = async () => {
             expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '24 hours')
         );`);
 
+        await pool.query(`CREATE TABLE IF NOT EXISTS story_views (
+            id SERIAL PRIMARY KEY,
+            story_id INTEGER REFERENCES stories(id) ON DELETE CASCADE,
+            viewer_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            viewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(story_id, viewer_id)
+        );`);
+
         await pool.query(`CREATE TABLE IF NOT EXISTS favorites (
             id SERIAL PRIMARY KEY,
             user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             companion_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, companion_id)
+        );`);
+
+        await pool.query(`CREATE TABLE IF NOT EXISTS push_subscriptions (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            endpoint TEXT NOT NULL,
+            keys_p256dh TEXT NOT NULL,
+            keys_auth TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, endpoint)
+        );`);
+
+        // ─── Wallet Balances Table ─────────────────────────────────
+        await pool.query(`CREATE TABLE IF NOT EXISTS wallet_balances (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE UNIQUE,
+            available_balance DECIMAL(10, 2) DEFAULT 0,
+            pending_escrow DECIMAL(10, 2) DEFAULT 0,
+            total_withdrawn DECIMAL(10, 2) DEFAULT 0,
+            total_earned DECIMAL(10, 2) DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );`);
+
+        // ─── Wallet Transactions Table ─────────────────────────────
+        await pool.query(`CREATE TABLE IF NOT EXISTS wallet_transactions (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL,
+            type VARCHAR(30) NOT NULL,
+            amount DECIMAL(10, 2) NOT NULL,
+            title VARCHAR(255),
+            description TEXT,
+            status VARCHAR(30) DEFAULT 'completed',
+            method VARCHAR(50),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );`);
+
+        // ─── Payout / Withdrawal Requests Table ────────────────────
+        await pool.query(`CREATE TABLE IF NOT EXISTS payout_requests (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            amount DECIMAL(10, 2) NOT NULL,
+            payout_method VARCHAR(30) NOT NULL,
+            upi_id VARCHAR(100),
+            account_holder_name VARCHAR(100),
+            account_number VARCHAR(50),
+            ifsc_code VARCHAR(30),
+            status VARCHAR(30) DEFAULT 'pending',
+            reference_id VARCHAR(100),
+            admin_notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            processed_at TIMESTAMP
         );`);
 
         // ─── Performance Indexes ───────────────────────────────────
@@ -235,14 +322,56 @@ const connectDB = async () => {
         await pool.query("CREATE INDEX IF NOT EXISTS idx_bookings_boy ON bookings(boy_id);");
         await pool.query("CREATE INDEX IF NOT EXISTS idx_bookings_girl ON bookings(girl_id);");
         await pool.query("CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings(status);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_bookings_payment_status ON bookings(payment_status);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_wallet_balances_user ON wallet_balances(user_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user ON wallet_transactions(user_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_payout_requests_user ON payout_requests(user_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_payout_requests_status ON payout_requests(status);");
+        await pool.query(`CREATE TABLE IF NOT EXISTS review_helpful_votes (
+            id SERIAL PRIMARY KEY,
+            review_id INTEGER REFERENCES reviews(id) ON DELETE CASCADE,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(review_id, user_id)
+        );`);
+
+        // ─── Performance Indexes ───────────────────────────────────
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_favorites_companion ON favorites(companion_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_stories_user ON stories(user_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_stories_expires ON stories(expires_at);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_call_history_caller ON call_history(caller_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_call_history_receiver ON call_history(receiver_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_users_kyc ON users(kyc_status);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages(receiver_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_bookings_boy ON bookings(boy_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_bookings_girl ON bookings(girl_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings(status);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_bookings_payment_status ON bookings(payment_status);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_wallet_balances_user ON wallet_balances(user_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user ON wallet_transactions(user_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_payout_requests_user ON payout_requests(user_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_payout_requests_status ON payout_requests(status);");
         await pool.query("CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);");
         await pool.query("CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);");
         await pool.query("CREATE INDEX IF NOT EXISTS idx_reviews_companion ON reviews(companion_id);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_reviews_helpful ON review_helpful_votes(review_id, user_id);");
         await pool.query("CREATE INDEX IF NOT EXISTS idx_reports_reported ON reports(reported_id);");
         await pool.query("CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);");
         await pool.query("CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id);");
         await pool.query("CREATE INDEX IF NOT EXISTS idx_sos_alerts_user ON sos_alerts(user_id);");
         await pool.query("CREATE INDEX IF NOT EXISTS idx_emergency_contacts_user ON emergency_contacts(user_id);");
+
+        // ─── High-Throughput Composite Indexes for Scale (100k+ Users) ───
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_messages_chat_composite ON messages (sender_id, receiver_id, created_at);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_messages_chat_rev_composite ON messages (receiver_id, sender_id, created_at);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages (receiver_id, is_read);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications (user_id, is_read);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications (user_id, created_at DESC);");
+        await pool.query("CREATE INDEX IF NOT EXISTS idx_posts_feed_lookup ON posts (created_at DESC);");
 
         console.log('✅ Database Auto-Fixed: Tables & Indexes ready!');
     } catch (err) {

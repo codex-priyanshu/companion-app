@@ -1,6 +1,11 @@
 import React, { useState } from "react";
 import { PAGES } from "../App";
 import { FiEye, FiEyeOff } from "react-icons/fi";
+import { getFriendlyErrorMessage } from "../utils/errorHandler";
+
+// Backend API Base Configuration
+const API_BASE = process.env.REACT_APP_API_URL || "https://rentgf-and-bf.onrender.com";
+const API = `${API_BASE}/api`;
 
 function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultRole }) {
     const [step, setStep] = useState("login"); // "login" | "forgot" | "reset" | "verify"
@@ -22,34 +27,48 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
         setFormData({ ...formData, [e.target.name]: e.target.value });
     };
 
-    // ── LOGIN ──────────────────────────────────────────────────
+    // ── LOGIN HANDLER ──────────────────────────────────────────
     const handleLogin = async (e) => {
         e.preventDefault();
-        setLoading(true);
         setError("");
 
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            setError("No internet connection. Please turn on mobile data or Wi-Fi to login.");
+            return;
+        }
+        if (!formData.emailOrPhone?.trim()) {
+            setError("Please enter your email or phone number.");
+            return;
+        }
+        if (!formData.password) {
+            setError("Please enter your password.");
+            return;
+        }
+
+        setLoading(true);
+
         try {
-            const response = await fetch("https://rentgf-and-bf.onrender.com/api/login", {
+            const response = await fetch(`${API}/login`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(formData)
             });
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({}));
 
             if (response.ok) {
-                // Check if account is verified
-                if (data.user.is_verified === false) {
-                    // Send OTP and go to verify step
-                    setVerifyEmail(data.user.email || formData.emailOrPhone);
+                // Defensive check if account is not verified
+                if (data.user && data.user.is_verified === false) {
+                    const targetEmail = data.user.email || formData.emailOrPhone;
+                    setVerifyEmail(targetEmail);
                     setVerifyOtp("");
-                    await fetch("https://rentgf-and-bf.onrender.com/api/send-otp", {
+                    await fetch(`${API}/send-otp`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ email: data.user.email })
-                    });
+                        body: JSON.stringify({ email: targetEmail })
+                    }).catch(() => {});
                     setStep("verify");
-                    setError("");
+                    setError("Your account is not verified. A new verification OTP has been sent to your email.");
                     return;
                 }
 
@@ -66,11 +85,30 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
                     if (setBoyUser) setBoyUser(data.user);
                     setPage(PAGES.BOY_DASHBOARD);
                 }
+            } else if (response.status === 403 && data.error === "UNVERIFIED_ACCOUNT") {
+                const targetEmail = data.email || formData.emailOrPhone;
+                setVerifyEmail(targetEmail);
+                setVerifyOtp("");
+                try {
+                    await fetch(`${API}/send-otp`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ email: targetEmail })
+                    });
+                } catch (sendErr) {
+                    console.error("Auto send OTP error:", sendErr);
+                }
+                setStep("verify");
+                setError("Your account is not verified. A new verification code has been sent to your email.");
+                return;
+            } else if (response.status === 401) {
+                setError(data.error || "Incorrect email/phone or password. Please try again.");
             } else {
-                setError(data.error || "Login failed. Please try again.");
+                setError(getFriendlyErrorMessage(null, data, "Login failed. Please check your credentials."));
             }
         } catch (err) {
-            setError("Server error. Please try again later.");
+            console.error("Login fetch error:", err);
+            setError(getFriendlyErrorMessage(err, null, "Unable to connect to server. Please try again in a few moments."));
         } finally {
             setLoading(false);
         }
@@ -79,28 +117,42 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
     // ── VERIFY OTP (for unverified accounts at login) ──
     const handleVerifyOtpAtLogin = async (e) => {
         e.preventDefault();
-        setLoading(true);
         setError("");
+
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            setError("No internet connection. Please check your network to verify OTP.");
+            return;
+        }
+
+        setLoading(true);
         try {
-            const response = await fetch("https://rentgf-and-bf.onrender.com/api/verify-otp", {
+            const response = await fetch(`${API}/verify-otp`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ email: verifyEmail, otp: verifyOtp })
             });
-            const data = await response.json();
+            const data = await response.json().catch(() => ({}));
             if (response.ok) {
                 setSuccess("Account verified! Logging you in...");
                 setTimeout(() => {
                     localStorage.setItem("token", data.token);
                     localStorage.setItem("user", JSON.stringify(data.user));
-                    if (data.user.role === 'girl') { if (setGirlUser) setGirlUser(data.user); setPage(PAGES.GIRL_DASHBOARD); }
-                    else { if (setBoyUser) setBoyUser(data.user); setPage(PAGES.BOY_DASHBOARD); }
+                    if (data.user.role === 'girl') {
+                        if (setGirlUser) setGirlUser(data.user);
+                        setPage(PAGES.GIRL_DASHBOARD);
+                    } else if (data.user.role === 'admin') {
+                        if (setAdminUser) setAdminUser(data.user);
+                        setPage(PAGES.ADMIN_DASHBOARD);
+                    } else {
+                        if (setBoyUser) setBoyUser(data.user);
+                        setPage(PAGES.BOY_DASHBOARD);
+                    }
                 }, 1000);
             } else {
-                setError(data.error || "Invalid OTP.");
+                setError(getFriendlyErrorMessage(null, data, "Invalid OTP code. Please check and try again."));
             }
         } catch (err) {
-            setError("Verification failed.");
+            setError(getFriendlyErrorMessage(err, null, "Verification failed. Please check your connection."));
         } finally {
             setLoading(false);
         }
@@ -109,16 +161,22 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
     // ── FORGOT PASSWORD — SEND OTP ─────────────────────────────
     const handleForgotPassword = async (e) => {
         e.preventDefault();
-        setLoading(true);
         setError("");
         setSuccess("");
+
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            setError("No internet connection. Please check your network to send OTP.");
+            return;
+        }
+
+        setLoading(true);
         setLoadingMsg("Sending OTP...");
 
         const sendOtpRequest = async () => {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
             try {
-                const response = await fetch("https://rentgf-and-bf.onrender.com/api/forgot-password", {
+                const response = await fetch(`${API}/forgot-password`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ email: forgotEmail }),
@@ -139,7 +197,7 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
             } catch (firstErr) {
                 if (firstErr.name === "AbortError") {
                     // Auto-retry once — server was waking up
-                    setLoadingMsg("Server start ho raha hai... dobara try kar rahe hain (30s)...");
+                    setLoadingMsg("Connecting to server... retrying (30s)...");
                     await new Promise(r => setTimeout(r, 5000));
                     response = await sendOtpRequest();
                 } else {
@@ -147,19 +205,15 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
                 }
             }
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({}));
             if (response.ok) {
                 setSuccess("OTP sent! Please check your email inbox and spam folder.");
                 setTimeout(() => { setSuccess(""); setStep("reset"); }, 2000);
             } else {
-                setError(data.error || "Something went wrong. Please try again.");
+                setError(getFriendlyErrorMessage(null, data, "Unable to send OTP. Please check the email address."));
             }
         } catch (err) {
-            if (err.name === "AbortError") {
-                setError("Server abhi bhi start ho raha hai. Please 30 seconds baad dobara try karein.");
-            } else {
-                setError("Server error. Please try again.");
-            }
+            setError(getFriendlyErrorMessage(err, null, "Unable to reach server. Please check your connection and try again."));
         } finally {
             setLoading(false);
             setLoadingMsg("");
@@ -169,23 +223,27 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
     // ── RESET PASSWORD — VERIFY OTP + SET NEW PASSWORD ─────────
     const handleResetPassword = async (e) => {
         e.preventDefault();
-        setLoading(true);
         setError("");
         setSuccess("");
 
-        if (resetData.newPassword !== resetData.confirmPassword) {
-            setError("Passwords do not match.");
-            setLoading(false);
-            return;
-        }
-        if (resetData.newPassword.length < 5) {
-            setError("Password must be at least 5 characters.");
-            setLoading(false);
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            setError("No internet connection. Please check your network to reset password.");
             return;
         }
 
+        if (resetData.newPassword !== resetData.confirmPassword) {
+            setError("Passwords do not match. Please re-enter.");
+            return;
+        }
+        if (resetData.newPassword.length < 6) {
+            setError("Password must be at least 6 characters long.");
+            return;
+        }
+
+        setLoading(true);
+
         try {
-            const response = await fetch("https://rentgf-and-bf.onrender.com/api/reset-password", {
+            const response = await fetch(`${API}/reset-password`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -195,9 +253,9 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
                 })
             });
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({}));
             if (response.ok) {
-                setSuccess("Password reset successfully! Please login.");
+                setSuccess("Password reset successfully! Please login with your new password.");
                 setTimeout(() => {
                     setStep("login");
                     setForgotEmail("");
@@ -205,21 +263,33 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
                     setSuccess("");
                 }, 2000);
             } else {
-                setError(data.error || "Password reset failed. Please try again.");
+                setError(getFriendlyErrorMessage(null, data, "Password reset failed. Please check the OTP."));
             }
         } catch (err) {
-            setError("Server error. Please try again.");
+            setError(getFriendlyErrorMessage(err, null, "Unable to reach server. Please check your connection and try again."));
         } finally {
             setLoading(false);
         }
     };
 
     return (
-        <div className="min-h-[100dvh] bg-[#0D0D1A] flex items-center justify-center p-4 relative z-0">
+        <div className="min-h-[100dvh] bg-[#0D0D1A] flex flex-col items-center justify-center p-4 relative z-0 overflow-x-hidden w-full">
             <div className="absolute w-96 h-96 rounded-full blur-[100px] pointer-events-none -z-10 bg-pink-600/10"></div>
             <div className="absolute bottom-10 right-10 w-96 h-96 rounded-full blur-[100px] pointer-events-none -z-10 bg-purple-600/10"></div>
 
-            <div className="bg-[#16162A]/90 w-full max-w-md p-8 rounded-2xl border border-white/10 shadow-[0_15px_50px_rgba(0,0,0,0.8)] backdrop-blur-md relative overflow-hidden transition-colors duration-500">
+            {/* Top Navigation Bar: Back to Home */}
+            <div className="w-full max-w-md mb-3 flex items-center justify-between z-10">
+                <button
+                    type="button"
+                    onClick={() => setPage(PAGES.HOME)}
+                    className="inline-flex items-center gap-2 text-xs font-semibold text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 px-3.5 py-2 rounded-xl transition border border-white/5 backdrop-blur"
+                >
+                    <span>←</span>
+                    <span>Back to Home</span>
+                </button>
+            </div>
+
+            <div className="bg-[#16162A]/90 w-full max-w-md p-6 sm:p-8 rounded-2xl border border-white/10 shadow-[0_15px_50px_rgba(0,0,0,0.8)] backdrop-blur-md relative overflow-hidden transition-colors duration-500">
                 <div className="absolute -top-12 -right-12 w-24 h-24 bg-pink-500/5 rounded-full blur-xl pointer-events-none"></div>
                 <div className="absolute -bottom-12 -left-12 w-24 h-24 bg-purple-500/5 rounded-full blur-xl pointer-events-none"></div>
 
@@ -255,9 +325,39 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
                                 {loading ? "Verifying..." : "Verify & Login"}
                             </button>
                         </form>
-                        <button onClick={() => { setStep("login"); setError(""); }} className="mt-4 text-xs text-gray-500 hover:text-gray-300 transition w-full text-center">
-                            ← Back to Login
-                        </button>
+                        <div className="mt-4 flex items-center justify-between text-xs px-1">
+                            <button
+                                type="button"
+                                disabled={loading}
+                                onClick={async () => {
+                                    setLoading(true);
+                                    setError("");
+                                    try {
+                                        const res = await fetch(`${API}/send-otp`, {
+                                            method: "POST",
+                                            headers: { "Content-Type": "application/json" },
+                                            body: JSON.stringify({ email: verifyEmail })
+                                        });
+                                        const d = await res.json();
+                                        if (res.ok) {
+                                            setSuccess("A new OTP has been sent! Please check your email.");
+                                        } else {
+                                            setError(d.error || "Failed to resend OTP. Please try again.");
+                                        }
+                                    } catch (err) {
+                                        setError("Unable to connect to server. Please try again.");
+                                    } finally {
+                                        setLoading(false);
+                                    }
+                                }}
+                                className="text-pink-400 hover:text-pink-300 transition font-medium"
+                            >
+                                🔄 Resend Code
+                            </button>
+                            <button onClick={() => { setStep("login"); setError(""); setSuccess(""); }} className="text-gray-500 hover:text-gray-300 transition">
+                                ← Back to Login
+                            </button>
+                        </div>
                     </>
                 )}
 
@@ -266,12 +366,16 @@ function UnifiedLogin({ setPage, setGirlUser, setBoyUser, setAdminUser, defaultR
                     <>
                         {/* Platform Branding */}
                         <div className="flex items-center justify-center gap-2.5 mb-6 cursor-pointer" onClick={() => setPage(PAGES.HOME)}>
-                            <svg className="w-8 h-8 text-[#0095f6]" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                <path d="M49.9999 15L23.157 30.5V61.5L49.9999 77L76.8428 61.5V30.5L49.9999 15Z" stroke="#0095f6" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-                                <path d="M49.9999 35L36.1436 43V59L49.9999 67L63.8563 59V43L49.9999 35Z" stroke="#0095f6" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-                                <path d="M23 30.5L50 50M77 30.5L50 50M50 77V50" stroke="#0095f6" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
+                            <svg className="w-9 h-9 drop-shadow-[0_0_8px_rgba(225,48,108,0.4)]" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M22 40H68C68 40 69 68 45 68C21 68 22 40 22 40Z" stroke="url(#login-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+                                <path d="M68 45H75C80 45 83 48 83 53C83 58 80 61 75 61H66" stroke="url(#login-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+                                <path d="M18 75H72" stroke="url(#login-grad)" strokeWidth="6" strokeLinecap="round"/>
+                                <path d="M45 29C40 23 32 30 39 37L45 42L51 37C58 30 50 23 45 29Z" fill="url(#login-grad)"/>
+                                <path d="M31 27C30 24 31 21 33 19" stroke="url(#login-grad)" strokeWidth="4" strokeLinecap="round"/>
+                                <path d="M59 27C60 24 59 21 57 19" stroke="url(#login-grad)" strokeWidth="4" strokeLinecap="round"/>
+                                <defs><linearGradient id="login-grad" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse"><stop stopColor="#f9ce3f" /><stop offset="0.5" stopColor="#e1306c" /><stop offset="1" stopColor="#833ab4" /></linearGradient></defs>
                             </svg>
-                            <span className="text-2xl font-black text-white tracking-wide">Coffeely</span>
+                            <span className="text-2xl font-black bg-gradient-to-r from-[#f9ce3f] via-[#e1306c] to-[#833ab4] bg-clip-text text-transparent tracking-wide">Coffeely</span>
                         </div>
 
                         <h2 className="text-2xl font-extrabold text-center text-white mb-1">Welcome Back</h2>

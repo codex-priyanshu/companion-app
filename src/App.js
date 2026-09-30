@@ -15,11 +15,19 @@ import UnifiedLogin from "./components/UnifiedLogin";
 import NotificationsPage from "./components/NotificationsPage";
 import LegalPages from "./components/shared/LegalPages";
 import PWAInstallBanner from "./components/shared/PWAInstallBanner";
+import AppUpdateModal from "./components/shared/AppUpdateModal";
 import CallOverlay from "./components/shared/CallOverlay";
+import GirlWalletTab from "./components/girl/GirlWalletTab";
+import KYCUploadPrompt from "./components/shared/KYCUploadPrompt";
+import OfflineBanner from "./components/shared/OfflineBanner";
+import { registerPushNotifications } from "./utils/pushManager";
 import { io } from "socket.io-client";
 
 const socket = io("https://rentgf-and-bf.onrender.com", {
-  transports: ['websocket']
+  transports: ['websocket'],
+  auth: (cb) => {
+    cb({ token: localStorage.getItem('token') });
+  }
 });
 
 export const PAGES = {
@@ -39,6 +47,7 @@ export const PAGES = {
   MESSAGES: "messages",
   NOTIFICATIONS: "notifications",
   LEGAL: "legal",
+  WALLET: "wallet",
 };
 
 function App() {
@@ -50,6 +59,20 @@ function App() {
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [globalAlert, setGlobalAlert] = useState(null);
   const [activeMessageAlert, setActiveMessageAlert] = useState(null);
+  const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   useEffect(() => {
     window.alert = (msg) => {
@@ -134,6 +157,7 @@ function App() {
 
         if (response.ok) {
           const userData = await response.json();
+          localStorage.setItem("user", JSON.stringify(userData));
 
           if (userData.role === "admin") {
             setAdminUser(userData);
@@ -145,11 +169,29 @@ function App() {
             setGirlUser(userData);
             setPage(PAGES.GIRL_DASHBOARD);
           }
-        } else {
+        } else if (response.status === 401 || response.status === 403) {
           localStorage.removeItem("token");
+          localStorage.removeItem("user");
         }
       } catch (err) {
-        console.error(err);
+        console.warn("Session verification offline or server unreachable, attempting cached user fallback:", err);
+        // If offline or network error, restore cached user so user is not forcibly logged out
+        const cachedUserStr = localStorage.getItem("user");
+        if (cachedUserStr) {
+          try {
+            const cachedUser = JSON.parse(cachedUserStr);
+            if (cachedUser.role === "admin") {
+              setAdminUser(cachedUser);
+              setPage(PAGES.ADMIN_DASHBOARD);
+            } else if (cachedUser.role === "boy") {
+              setBoyUser(cachedUser);
+              setPage(PAGES.BOY_DASHBOARD);
+            } else if (cachedUser.role === "girl") {
+              setGirlUser(cachedUser);
+              setPage(PAGES.GIRL_DASHBOARD);
+            }
+          } catch (parseErr) { }
+        }
       } finally {
         setIsCheckingAuth(false);
       }
@@ -164,6 +206,7 @@ function App() {
     if (currentUser && socket) {
       socket.emit("user_connected", currentUser.id);
       socket.emit("join_own_room", currentUser.id);
+      registerPushNotifications(currentUser);
     }
   }, [currentUser]);
 
@@ -237,10 +280,13 @@ function App() {
     return (
       <div className="min-h-[100dvh] bg-black flex flex-col items-center justify-center gap-6 text-white">
         <div className="relative">
-          <svg className="w-16 h-16 animate-spin drop-shadow-[0_0_12px_rgba(225,48,108,0.6)]" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ animationDuration: '2.5s' }}>
-            <path d="M49.9999 15L23.157 30.5V61.5L49.9999 77L76.8428 61.5V30.5L49.9999 15Z" stroke="url(#loader-ai-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M49.9999 35L36.1436 43V59L49.9999 67L63.8563 59V43L49.9999 35Z" stroke="url(#loader-ai-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M23 30.5L50 50M77 30.5L50 50M50 77V50" stroke="url(#loader-ai-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
+          <svg className="w-16 h-16 drop-shadow-[0_0_12px_rgba(225,48,108,0.6)] animate-pulse" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M22 40H68C68 40 69 68 45 68C21 68 22 40 22 40Z" stroke="url(#loader-ai-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M68 45H75C80 45 83 48 83 53C83 58 80 61 75 61H66" stroke="url(#loader-ai-grad)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M18 75H72" stroke="url(#loader-ai-grad)" strokeWidth="6" strokeLinecap="round"/>
+            <path d="M45 29C40 23 32 30 39 37L45 42L51 37C58 30 50 23 45 29Z" fill="url(#loader-ai-grad)"/>
+            <path d="M31 27C30 24 31 21 33 19" stroke="url(#loader-ai-grad)" strokeWidth="4" strokeLinecap="round"/>
+            <path d="M59 27C60 24 59 21 57 19" stroke="url(#loader-ai-grad)" strokeWidth="4" strokeLinecap="round"/>
             <defs>
               <linearGradient id="loader-ai-grad" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse">
                 <stop stopColor="#f9ce3f" />
@@ -268,7 +314,7 @@ function App() {
       case PAGES.MESSAGES:
         return currentUser ? <MessagesPage currentUser={currentUser} setPage={setPage} setSelectedGirl={setSelectedGirl} socket={socket} /> : <UnifiedLogin setPage={setPage} />;
       case PAGES.NOTIFICATIONS:
-        return currentUser ? <NotificationsPage currentUser={currentUser} setPage={setPage} setSelectedGirl={setSelectedGirl} /> : <UnifiedLogin setPage={setPage} />;
+        return currentUser ? <NotificationsPage currentUser={currentUser} setPage={setPage} setSelectedGirl={setSelectedGirl} socket={socket} /> : <UnifiedLogin setPage={setPage} />;
       case PAGES.GIRL_LOGIN:
         return <UnifiedLogin setPage={setPage} setGirlUser={setGirlUser} setBoyUser={setBoyUser} setAdminUser={setAdminUser} defaultRole="girl" />;
       case PAGES.BOY_LOGIN:
@@ -285,9 +331,49 @@ function App() {
       case PAGES.FIND:
         return <FindPage setPage={setPage} setSelectedGirl={setSelectedGirl} currentUser={currentUser} />;
       case PAGES.DETAILS:
-        return selectedGirl ? <DetailsPage girl={selectedGirl} setPage={setPage} currentUser={currentUser} setSelectedGirl={setSelectedGirl} /> : <FindPage setPage={setPage} setSelectedGirl={setSelectedGirl} currentUser={currentUser} />;
+        return selectedGirl ? (
+          <DetailsPage 
+            girl={selectedGirl} 
+            setPage={setPage} 
+            currentUser={currentUser} 
+            setSelectedGirl={setSelectedGirl} 
+            onUpdateUser={(updated) => {
+              if (currentUser?.role === 'girl') setGirlUser(updated);
+              else setBoyUser(updated);
+            }} 
+          />
+        ) : <FindPage setPage={setPage} setSelectedGirl={setSelectedGirl} currentUser={currentUser} />;
       case PAGES.CHAT:
         return selectedGirl ? <ChatPage girl={selectedGirl} currentUser={currentUser} setPage={setPage} setSelectedGirl={setSelectedGirl} /> : <FindPage setPage={setPage} setSelectedGirl={setSelectedGirl} currentUser={currentUser} />;
+      case PAGES.WALLET: {
+        const hasDoc = Boolean(currentUser?.id_proof_url || currentUser?.kyc_status === 'verified' || currentUser?.kyc_status === 'pending');
+        return currentUser ? (
+          !hasDoc ? (
+            <div className="pt-20 pb-24 min-h-[100dvh] max-w-lg mx-auto px-4 flex flex-col items-center justify-center">
+              <KYCUploadPrompt
+                user={currentUser}
+                onUploadSuccess={(updatedUser) => {
+                  if (currentUser.role === 'girl') setGirlUser(updatedUser);
+                  else setBoyUser(updatedUser);
+                }}
+                onCancel={() => setPage(PAGES.HOME)}
+              />
+            </div>
+          ) : (
+            <div className="pt-20 pb-24 min-h-[100dvh] max-w-4xl mx-auto px-4">
+              <div className="mb-6 text-left">
+                <h1 className="text-2xl font-black bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 bg-clip-text text-transparent">
+                  My Wallet & Earnings 💰
+                </h1>
+                <p className="text-xs text-gray-400 mt-0.5">Manage your available balance, escrow holds, and instant payouts</p>
+              </div>
+              <GirlWalletTab user={currentUser} />
+            </div>
+          )
+        ) : (
+          <UnifiedLogin setPage={setPage} setGirlUser={setGirlUser} setBoyUser={setBoyUser} />
+        );
+      }
       case PAGES.LEGAL:
         return <LegalPages setPage={setPage} />;
       default:
@@ -297,6 +383,7 @@ function App() {
 
   return (
     <div className="min-h-[100dvh] bg-black text-[#f5f5f5] overflow-x-hidden w-full relative">
+      <OfflineBanner isOnline={isOnline} />
       <Navbar
         page={page}
         setPage={setPage}
@@ -309,6 +396,7 @@ function App() {
       />
       {renderPage()}
       <PWAInstallBanner />
+      <AppUpdateModal />
       {/* Instagram-Style Top Floating Message Alert Banner */}
       {activeMessageAlert && (
         <div 

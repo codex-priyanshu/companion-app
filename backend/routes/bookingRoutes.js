@@ -35,7 +35,21 @@ router.get('/bookings/booked-slots/:companionId', async (req, res) => {
 // ─── CREATE BOOKING — AUTH REQUIRED ──────────────────────────
 router.post('/bookings', authenticateToken, async (req, res) => {
     try {
-        const { boy_id, girl_id, hours, amount, meeting_date, meeting_time, meeting_location, meeting_details, time_slot } = req.body;
+        const { 
+            boy_id, 
+            girl_id, 
+            hours, 
+            amount, 
+            meeting_date, 
+            meeting_time, 
+            meeting_location, 
+            meeting_details, 
+            time_slot,
+            payment_id,
+            payment_status,
+            payment_method,
+            order_id
+        } = req.body;
         const sender_id = req.user.id;
 
         // Validate required fields
@@ -60,11 +74,66 @@ router.post('/bookings', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: "Unauthorized: Only participants can make bookings." });
         }
 
+        // KYC Guard: Date booking requires document upload
+        const senderUserRes = await pool.query('SELECT id_proof_url, kyc_status, role FROM users WHERE id = $1', [sender_id]);
+        const senderUser = senderUserRes.rows[0];
+        const hasDoc = Boolean(senderUser?.id_proof_url || senderUser?.kyc_status === 'verified' || senderUser?.kyc_status === 'pending');
+        if (!hasDoc && senderUser?.role !== 'admin') {
+            return res.status(403).json({ 
+                error: "Date ya companion book karne ke liye apna government document upload karna anivarya hai (Govt ID Required).", 
+                kyc_required: true 
+            });
+        }
+
+        const baseAmount = parseFloat(amount);
+        const platformFee = Math.round(baseAmount * 0.05);
+        const companionEarnings = baseAmount;
+        const effectivePaymentStatus = payment_status || (payment_id ? 'escrow_held' : 'pending');
+        const effectivePaymentMethod = payment_method || 'upi';
+
         const newBooking = await pool.query(
-            "INSERT INTO bookings (boy_id, girl_id, hours, amount, meeting_date, meeting_time, meeting_location, meeting_details, sender_id, time_slot) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *",
-            [boy_id, girl_id, hours, amount, meeting_date || null, meeting_time || null, meeting_location || null, meeting_details || null, sender_id, time_slot || null]
+            `INSERT INTO bookings (
+                boy_id, girl_id, hours, amount, meeting_date, meeting_time, 
+                meeting_location, meeting_details, sender_id, time_slot,
+                payment_id, payment_status, payment_method, order_id, platform_fee, companion_earnings
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) 
+            RETURNING *`,
+            [
+                boy_id, girl_id, hours, amount, 
+                meeting_date || null, meeting_time || null, meeting_location || null, meeting_details || null, 
+                sender_id, time_slot || null,
+                payment_id || null, effectivePaymentStatus, effectivePaymentMethod, order_id || null, platformFee, companionEarnings
+            ]
         );
-        res.status(201).json(newBooking.rows[0]);
+
+        const booking = newBooking.rows[0];
+
+        // 🛡️ If payment was captured & held in Escrow, credit companion's pending_escrow immediately
+        if (effectivePaymentStatus === 'escrow_held') {
+            await pool.query(
+                `INSERT INTO wallet_balances (user_id, available_balance, pending_escrow, total_withdrawn, total_earned)
+                 VALUES ($1, 0, $2, 0, 0)
+                 ON CONFLICT (user_id) DO UPDATE 
+                 SET pending_escrow = wallet_balances.pending_escrow + $2,
+                     updated_at = NOW()`,
+                [girl_id, companionEarnings]
+            );
+
+            await pool.query(
+                `INSERT INTO wallet_transactions (user_id, booking_id, type, amount, title, description, status, method)
+                 VALUES ($1, $2, 'escrow_hold', $3, $4, $5, 'in_escrow', $6)`,
+                [
+                    girl_id,
+                    booking.id,
+                    companionEarnings,
+                    `Session Escrow Hold (Booking #${booking.id})`,
+                    `Funds held safely in 100% Escrow Protection. Auto-released upon session completion.`,
+                    effectivePaymentMethod
+                ]
+            );
+        }
+
+        res.status(201).json(booking);
     } catch (err) {
         console.error('Booking error:', err);
         res.status(500).json({ error: "Server error" });
@@ -122,12 +191,74 @@ router.put('/bookings/:bookingId', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: "Forbidden: Only booking participants can update booking status." });
         }
 
+        // Companion accepting booking must also have uploaded a document
+        if (status === 'accepted') {
+            const participantUserRes = await pool.query('SELECT id_proof_url, kyc_status, role FROM users WHERE id = $1', [req.user.id]);
+            const participantUser = participantUserRes.rows[0];
+            const hasDoc = Boolean(participantUser?.id_proof_url || participantUser?.kyc_status === 'verified' || participantUser?.kyc_status === 'pending');
+            if (!hasDoc && participantUser?.role !== 'admin') {
+                return res.status(403).json({ 
+                    error: "Booking request accept karne ke liye government ID upload karna anivarya hai.", 
+                    kyc_required: true 
+                });
+            }
+        }
+
         const updatedBooking = await pool.query(
             "UPDATE bookings SET status = $1 WHERE id = $2 RETURNING *",
             [status, bookingId]
         );
+
+        // ─── AUTO ESCROW ENGINE ───
+        if (status === 'completed' && booking.payment_status === 'escrow_held') {
+            const companionEarnings = parseFloat(booking.companion_earnings) || parseFloat(booking.amount) || 1000;
+            await pool.query("UPDATE bookings SET payment_status = 'escrow_released' WHERE id = $1", [bookingId]);
+            await pool.query(
+                `INSERT INTO wallet_balances (user_id, available_balance, pending_escrow, total_withdrawn, total_earned)
+                 VALUES ($1, $2, 0, 0, $2)
+                 ON CONFLICT (user_id) DO UPDATE 
+                 SET pending_escrow = GREATEST(0, wallet_balances.pending_escrow - $2),
+                     available_balance = wallet_balances.available_balance + $2,
+                     total_earned = wallet_balances.total_earned + $2,
+                     updated_at = NOW()`,
+                [booking.girl_id, companionEarnings]
+            );
+            await pool.query(
+                `INSERT INTO wallet_transactions (user_id, booking_id, type, amount, title, description, status, method)
+                 VALUES ($1, $2, 'escrow_release', $3, $4, $5, 'completed', 'Escrow Release')`,
+                [
+                    booking.girl_id,
+                    bookingId,
+                    companionEarnings,
+                    `Session Payout (Booking #${bookingId})`,
+                    `Date session completed. Escrow released to available wallet balance.`,
+                    booking.payment_method || 'Escrow Release'
+                ]
+            );
+        } else if ((status === 'rejected' || status === 'cancelled') && booking.payment_status === 'escrow_held') {
+            const companionEarnings = parseFloat(booking.companion_earnings) || parseFloat(booking.amount) || 1000;
+            await pool.query("UPDATE bookings SET payment_status = 'escrow_refunded' WHERE id = $1", [bookingId]);
+            await pool.query(
+                "UPDATE wallet_balances SET pending_escrow = GREATEST(0, pending_escrow - $1), updated_at = NOW() WHERE user_id = $2",
+                [companionEarnings, booking.girl_id]
+            );
+            await pool.query(
+                `INSERT INTO wallet_transactions (user_id, booking_id, type, amount, title, description, status, method)
+                 VALUES ($1, $2, 'refund', $3, $4, $5, 'completed', 'Auto Refund')`,
+                [
+                    booking.boy_id,
+                    bookingId,
+                    companionEarnings,
+                    `Refund for Booking #${bookingId}`,
+                    `Booking was not accepted. Escrow refunded to client payment source.`,
+                    booking.payment_method || 'Auto Refund'
+                ]
+            );
+        }
+
         res.status(200).json(updatedBooking.rows[0]);
     } catch (err) {
+        console.error("Update booking status error:", err);
         res.status(500).json({ error: "Server error" });
     }
 });
@@ -135,8 +266,8 @@ router.put('/bookings/:bookingId', authenticateToken, async (req, res) => {
 // ─── SUBMIT REVIEW — AUTH REQUIRED ───────────────────────────
 router.post('/reviews', authenticateToken, moderateContent, async (req, res) => {
     try {
-        const { companion_id, rating, comment } = req.body;
-        const reviewer_id = req.user.id; // Always use authenticated user's ID
+        const { companion_id, rating, comment, compliment_tags, booking_id } = req.body;
+        const reviewer_id = req.user.id;
 
         if (!companion_id || !rating) {
             return res.status(400).json({ error: "companion_id and rating are required." });
@@ -147,36 +278,150 @@ router.post('/reviews', authenticateToken, moderateContent, async (req, res) => 
             return res.status(400).json({ error: "Rating must be between 1 and 5." });
         }
 
+        // Prevent self-review
+        if (parseInt(reviewer_id) === parseInt(companion_id)) {
+            return res.status(400).json({ error: "You cannot review your own profile." });
+        }
+
+        // Check if there was a completed booking between reviewer and companion
+        let isVerifiedBooking = false;
+        if (booking_id) {
+            const bCheck = await pool.query(
+                "SELECT id FROM bookings WHERE id = $1 AND boy_id = $2 AND girl_id = $3",
+                [booking_id, reviewer_id, companion_id]
+            );
+            if (bCheck.rows.length > 0) {
+                isVerifiedBooking = true;
+            }
+        } else {
+            const anyCompletedBooking = await pool.query(
+                "SELECT id FROM bookings WHERE (boy_id = $1 AND girl_id = $2) AND status = 'completed' LIMIT 1",
+                [reviewer_id, companion_id]
+            );
+            if (anyCompletedBooking.rows.length > 0) {
+                isVerifiedBooking = true;
+            }
+        }
+
         // Sanitize comment
-        const safeComment = comment ? comment.replace(/<[^>]*>/g, '').trim().slice(0, 500) : null;
+        const safeComment = comment ? comment.replace(/<[^>]*>/g, '').trim().slice(0, 800) : null;
+        const tags = Array.isArray(compliment_tags) ? compliment_tags.slice(0, 6) : [];
 
         const newReview = await pool.query(
-            "INSERT INTO reviews (reviewer_id, companion_id, rating, comment) VALUES ($1, $2, $3, $4) RETURNING *",
-            [reviewer_id, companion_id, safeRating, safeComment]
+            `INSERT INTO reviews (reviewer_id, companion_id, rating, comment, compliment_tags, booking_id, is_verified_booking) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+            [reviewer_id, companion_id, safeRating, safeComment, tags, booking_id || null, isVerifiedBooking]
         );
-        res.status(201).json(newReview.rows[0]);
+
+        // Fetch reviewer info for clean return
+        const reviewerInfo = await pool.query("SELECT name, profile_pic FROM users WHERE id = $1", [reviewer_id]);
+        const resultReview = {
+            ...newReview.rows[0],
+            reviewer_name: reviewerInfo.rows[0]?.name || "Anonymous",
+            reviewer_pic: reviewerInfo.rows[0]?.profile_pic || null
+        };
+
+        res.status(201).json(resultReview);
     } catch (err) {
+        console.error("Submit review error:", err);
         res.status(500).json({ error: "Server error" });
     }
 });
 
-// ─── GET REVIEWS — Public ─────────────────────────────────────
+// ─── GET REVIEWS WITH STAR BREAKDOWN & COMPLIMENTS — Public ───
 router.get('/reviews/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
-        const reviews = await pool.query(`
-            SELECT r.*, u.name as reviewer_name, u.profile_pic as reviewer_pic
-            FROM reviews r JOIN users u ON r.reviewer_id = u.id
-            WHERE r.companion_id = $1 ORDER BY r.created_at DESC
-        `, [userId]);
-        const avgResult = await pool.query("SELECT ROUND(AVG(rating), 1) as avg_rating FROM reviews WHERE companion_id = $1", [userId]);
+        const currentUserId = req.query.currentUserId;
+
+        const reviewsRes = await pool.query(`
+            SELECT r.*, 
+                   u.name as reviewer_name, 
+                   u.profile_pic as reviewer_pic,
+                   COALESCE(r.helpful_count, 0) as helpful_count,
+                   CASE 
+                       WHEN $2::integer IS NOT NULL AND EXISTS(SELECT 1 FROM review_helpful_votes WHERE review_id = r.id AND user_id = $2::integer) 
+                       THEN true ELSE false 
+                   END as has_voted_helpful
+            FROM reviews r 
+            JOIN users u ON r.reviewer_id = u.id
+            WHERE r.companion_id = $1 
+            ORDER BY r.created_at DESC
+        `, [userId, currentUserId ? parseInt(currentUserId) : null]);
+
+        const avgResult = await pool.query(
+            "SELECT ROUND(AVG(rating), 1) as avg_rating, COUNT(id) as total_count FROM reviews WHERE companion_id = $1",
+            [userId]
+        );
+
+        const totalReviews = parseInt(avgResult.rows[0]?.total_count || 0);
+        const avgRating = parseFloat(avgResult.rows[0]?.avg_rating || 0);
+
+        // Calculate 5★, 4★, 3★, 2★, 1★ breakdown
+        const breakdown = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+        const complimentsMap = {};
+
+        reviewsRes.rows.forEach(r => {
+            if (breakdown[r.rating] !== undefined) {
+                breakdown[r.rating]++;
+            }
+            if (Array.isArray(r.compliment_tags)) {
+                r.compliment_tags.forEach(tag => {
+                    complimentsMap[tag] = (complimentsMap[tag] || 0) + 1;
+                });
+            }
+        });
+
+        // Sort top compliments by count
+        const topCompliments = Object.entries(complimentsMap)
+            .map(([tag, count]) => ({ tag, count }))
+            .sort((a, b) => b.count - a.count);
+
         res.status(200).json({
-            reviews: reviews.rows,
-            avgRating: avgResult.rows[0].avg_rating || 0,
-            totalReviews: reviews.rows.length
+            reviews: reviewsRes.rows,
+            avgRating,
+            totalReviews,
+            breakdown,
+            topCompliments
         });
     } catch (err) {
+        console.error("Get reviews error:", err);
         res.status(500).json({ error: "Server error" });
+    }
+});
+
+// ─── TOGGLE HELPFUL VOTE ON REVIEW ─────────────────────────────
+router.post('/reviews/:id/helpful', authenticateToken, async (req, res) => {
+    try {
+        const reviewId = req.params.id;
+        const userId = req.user.id;
+
+        const voteCheck = await pool.query(
+            "SELECT id FROM review_helpful_votes WHERE review_id = $1 AND user_id = $2",
+            [reviewId, userId]
+        );
+
+        let hasVoted = false;
+        if (voteCheck.rows.length > 0) {
+            // Remove vote
+            await pool.query("DELETE FROM review_helpful_votes WHERE id = $1", [voteCheck.rows[0].id]);
+            await pool.query("UPDATE reviews SET helpful_count = GREATEST(0, COALESCE(helpful_count, 0) - 1) WHERE id = $1", [reviewId]);
+            hasVoted = false;
+        } else {
+            // Add vote
+            await pool.query("INSERT INTO review_helpful_votes (review_id, user_id) VALUES ($1, $2)", [reviewId, userId]);
+            await pool.query("UPDATE reviews SET helpful_count = COALESCE(helpful_count, 0) + 1 WHERE id = $1", [reviewId]);
+            hasVoted = true;
+        }
+
+        const updatedReview = await pool.query("SELECT helpful_count FROM reviews WHERE id = $1", [reviewId]);
+        res.status(200).json({
+            hasVoted,
+            helpful_count: updatedReview.rows[0]?.helpful_count || 0
+        });
+    } catch (err) {
+        console.error("Helpful vote error:", err);
+        res.status(500).json({ error: "Failed to update helpful vote" });
     }
 });
 
@@ -198,6 +443,29 @@ router.post('/bookings/:bookingId/cancel', authenticateToken, async (req, res) =
             "UPDATE bookings SET status = 'rejected', cancellation_reason = $1, canceled_by = $2 WHERE id = $3 RETURNING *",
             [reason || "No reason specified", canceled_by, bookingId]
         );
+
+        // Auto Refund Escrow
+        if (booking.payment_status === 'escrow_held') {
+            const companionEarnings = parseFloat(booking.companion_earnings) || parseFloat(booking.amount) || 1000;
+            await pool.query("UPDATE bookings SET payment_status = 'escrow_refunded' WHERE id = $1", [bookingId]);
+            await pool.query(
+                "UPDATE wallet_balances SET pending_escrow = GREATEST(0, pending_escrow - $1), updated_at = NOW() WHERE user_id = $2",
+                [companionEarnings, booking.girl_id]
+            );
+            await pool.query(
+                `INSERT INTO wallet_transactions (user_id, booking_id, type, amount, title, description, status, method)
+                 VALUES ($1, $2, 'refund', $3, $4, $5, 'completed', 'Auto Refund')`,
+                [
+                    booking.boy_id,
+                    bookingId,
+                    companionEarnings,
+                    `Refund for Booking #${bookingId}`,
+                    `Booking was canceled. Funds automatically refunded to original payment method.`,
+                    booking.payment_method || 'Auto Refund'
+                ]
+            );
+        }
+
         res.status(200).json(updated.rows[0]);
     } catch (err) {
         console.error("Cancel booking error:", err);

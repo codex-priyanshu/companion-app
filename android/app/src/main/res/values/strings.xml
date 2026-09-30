@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Coffeely</string>
+    <string name="title_activity_main">Coffeely</string>
+    <string name="package_name">com.coffeely.app</string>
+    <string name="custom_url_scheme">com.coffeely.app</string>
+</resources>

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { PAGES } from "../../App";
+import { getFriendlyErrorMessage } from "../../utils/errorHandler";
 
 function BoyRegister({ setPage, setBoyUser }) {
     const [form, setForm] = useState({ name: "", email: "", password: "", age: "", city: "" });
@@ -8,8 +9,14 @@ function BoyRegister({ setPage, setBoyUser }) {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
-        setLoading(true);
         setError("");
+
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            setError("No internet connection. Please check your network to create an account.");
+            return;
+        }
+
+        setLoading(true);
 
         try {
             const response = await fetch("https://rentgf-and-bf.onrender.com/api/register", {
@@ -29,17 +36,17 @@ function BoyRegister({ setPage, setBoyUser }) {
                 }),
             });
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({}));
 
             if (response.ok) {
-                alert("Account successfully ban gaya! Ab apna email aur password daal kar login karein.");
+                alert("Account created successfully! Please login with your email and password.");
                 setPage(PAGES.BOY_LOGIN);
             } else {
-                setError(data.error);
+                setError(getFriendlyErrorMessage(null, data, "Registration failed. Please check your details."));
             }
         } catch (err) {
             console.error(err);
-            setError("Server se connect nahi ho paya. Backend chalu hai?");
+            setError(getFriendlyErrorMessage(err, null, "Unable to reach server. Please check your connection."));
         } finally {
             setLoading(false);
         }

@@ -1,7 +1,14 @@
 import React, { useState, useEffect } from "react";
 import { PAGES } from "../../App";
-import { FiSearch, FiUsers, FiUser, FiMapPin, FiStar, FiFilter, FiRotateCcw, FiNavigation, FiHeart } from "react-icons/fi";
+import { FiSearch, FiUsers, FiUser, FiMapPin, FiStar, FiFilter, FiRotateCcw, FiNavigation, FiHeart, FiGrid, FiMap } from "react-icons/fi";
 import StoriesBar from "./StoriesBar";
+import CompanionMapView from "./CompanionMapView";
+import VerifiedBadge from "./VerifiedBadge";
+import { CompanionGridSkeleton } from "./SkeletonLoaders";
+
+// Backend API Base Configuration
+const API_BASE = process.env.REACT_APP_API_URL || "https://rentgf-and-bf.onrender.com";
+const API = `${API_BASE}/api`;
 
 const CITIES = ["All", "Mumbai", "Delhi", "Pune", "Bangalore", "Chennai", "Hyderabad", "Jaipur"];
 const ALL_TAGS = ["All", "Coffee Date", "Movie", "Shopping", "Study Partner", "Dinner", "Events", "Walk", "Gaming"];
@@ -37,6 +44,7 @@ function FindPage({ setPage, setSelectedGirl, currentUser }) {
     const [users, setUsers] = useState([]);
     const [loading, setLoading] = useState(true);
     const [favIds, setFavIds] = useState(new Set());
+    const [viewMode, setViewMode] = useState("grid"); // 'grid' | 'map'
 
     const [genderFilter, setGenderFilter] = useState(currentUser?.role === "girl" ? "boy" : "girl");
 
@@ -46,7 +54,7 @@ function FindPage({ setPage, setSelectedGirl, currentUser }) {
         const token = localStorage.getItem("token");
         if (!token) return;
 
-        fetch("https://rentgf-and-bf.onrender.com/api/favorites", {
+        fetch(`${API}/favorites`, {
             headers: { Authorization: `Bearer ${token}` }
         })
         .then(r => r.ok ? r.json() : [])
@@ -67,7 +75,7 @@ function FindPage({ setPage, setSelectedGirl, currentUser }) {
 
         const token = localStorage.getItem("token");
         try {
-            const res = await fetch("https://rentgf-and-bf.onrender.com/api/favorites/toggle", {
+            const res = await fetch(`${API}/favorites/toggle`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -104,7 +112,7 @@ function FindPage({ setPage, setSelectedGirl, currentUser }) {
 
                 if (currentUser) {
                     const token = localStorage.getItem("token");
-                    fetch(`https://rentgf-and-bf.onrender.com/api/users/${currentUser.id}`, {
+                    fetch(`${API}/users/${currentUser.id}`, {
                         method: "PUT",
                         headers: {
                             "Content-Type": "application/json",
@@ -145,8 +153,8 @@ function FindPage({ setPage, setSelectedGirl, currentUser }) {
                     headers["Authorization"] = `Bearer ${token}`;
                 }
                 const url = genderFilter === "all" 
-                    ? `https://rentgf-and-bf.onrender.com/api/users`
-                    : `https://rentgf-and-bf.onrender.com/api/users?role=${genderFilter}`;
+                    ? `${API}/users`
+                    : `${API}/users?role=${genderFilter}`;
                 
                 const response = await fetch(url, { headers });
                 const data = await response.json();
@@ -333,6 +341,34 @@ function FindPage({ setPage, setSelectedGirl, currentUser }) {
                     </div>
 
                     <div className="flex items-center gap-2">
+                        {/* View Switcher: Cards vs Map */}
+                        <div className="flex items-center bg-[#16162A] border border-white/10 rounded-xl p-1">
+                            <button
+                                onClick={() => setViewMode("grid")}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                                    viewMode === "grid"
+                                        ? "bg-pink-500 text-white shadow-md"
+                                        : "text-gray-400 hover:text-white"
+                                }`}
+                                title="Grid Cards View"
+                            >
+                                <FiGrid size={13} />
+                                <span className="hidden sm:inline">Cards</span>
+                            </button>
+                            <button
+                                onClick={() => setViewMode("map")}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                                    viewMode === "map"
+                                        ? "bg-gradient-to-r from-pink-500 to-purple-600 text-white shadow-md"
+                                        : "text-gray-400 hover:text-white"
+                                }`}
+                                title="Interactive Map View"
+                            >
+                                <FiMap size={13} />
+                                <span className="hidden sm:inline">Map 📍</span>
+                            </button>
+                        </div>
+
                         <span className="text-xs text-gray-500 hidden sm:inline">Sort:</span>
                         <select
                             value={sortBy}
@@ -449,7 +485,16 @@ function FindPage({ setPage, setSelectedGirl, currentUser }) {
                 </div>
 
                 {loading ? (
-                    <div className="text-center py-20 text-pink-500 animate-pulse">Loading profiles...</div>
+                    <CompanionGridSkeleton count={6} />
+                ) : viewMode === "map" ? (
+                    <CompanionMapView
+                        companions={filtered}
+                        userLoc={userLoc}
+                        onSelectProfile={handleProfileClick}
+                        onLocateMe={getUserLocation}
+                        favIds={favIds}
+                        onToggleFavorite={handleQuickFavorite}
+                    />
                 ) : filtered.length === 0 ? (
                     <div className="text-center py-20 text-gray-500">No companions found. Try different filters.</div>
                 ) : (
@@ -459,15 +504,19 @@ function FindPage({ setPage, setSelectedGirl, currentUser }) {
                                 return (
                                     <div
                                         key={u.id}
-                                        className={`bg-[#16162A] border border-white/5 rounded-2xl overflow-hidden cursor-pointer hover:-translate-y-1 transition flex flex-col ${isTargetGirl ? 'hover:border-pink-500/30' : 'hover:border-blue-500/30'}`}
+                                        className={`group bg-[#16162A]/90 backdrop-blur-sm border border-white/10 rounded-2xl overflow-hidden cursor-pointer hover:-translate-y-1.5 transition-all duration-300 flex flex-col shadow-lg hover:shadow-2xl ${
+                                            isTargetGirl 
+                                                ? 'hover:border-pink-500/40 hover:shadow-pink-500/15' 
+                                                : 'hover:border-blue-500/40 hover:shadow-blue-500/15'
+                                        }`}
                                         onClick={() => handleProfileClick(u)}
                                     >
-                                        <div className={`relative h-48 flex items-center justify-center bg-gradient-to-br ${isTargetGirl ? 'from-pink-500/20 to-purple-500/20' : 'from-blue-500/20 to-indigo-500/20'}`}>
+                                        <div className={`relative h-52 flex items-center justify-center overflow-hidden bg-gradient-to-br ${isTargetGirl ? 'from-pink-500/20 to-purple-500/20' : 'from-blue-500/20 to-indigo-500/20'}`}>
                                             {u.profile_pic ? (
                                                 <img
                                                     src={u.profile_pic}
                                                     alt={u.name}
-                                                    className="w-full h-full object-cover transition duration-500 hover:scale-110"
+                                                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                                                 />
                                             ) : (
                                                 <div className="text-5xl text-white/30 flex items-center justify-center">
@@ -476,55 +525,66 @@ function FindPage({ setPage, setSelectedGirl, currentUser }) {
                                             )}
 
                                             {u.kyc_status === 'verified' && (
-                                                <div className="absolute top-3 left-3 bg-purple-500/20 border border-purple-500/40 rounded-full px-2 py-0.5 text-xs text-purple-300 backdrop-blur-sm">
-                                                    ✓ Verified
+                                                <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-md border border-white/15 rounded-full pl-1.5 pr-2.5 py-0.5 text-[11px] font-bold text-white flex items-center gap-1.5 shadow-md">
+                                                    <VerifiedBadge size="xs" />
+                                                    <span>Verified</span>
                                                 </div>
                                             )}
 
                                             {currentUser && currentUser.id !== u.id && (
                                                 <button
                                                     onClick={(e) => handleQuickFavorite(e, u.id)}
-                                                    className="absolute top-3 right-3 w-8 h-8 rounded-full bg-black/40 backdrop-blur-md hover:bg-black/60 flex items-center justify-center transition shadow-lg text-white group"
+                                                    className="absolute top-3 right-3 w-8 h-8 rounded-full bg-black/50 backdrop-blur-md hover:bg-black/75 flex items-center justify-center transition-all duration-200 shadow-lg text-white active:scale-90"
                                                     title={favIds.has(u.id) ? "Remove Favorite" : "Save Favorite"}
                                                 >
-                                                    <FiHeart size={14} className={favIds.has(u.id) ? "fill-red-500 text-red-500" : "text-gray-300 group-hover:text-white"} />
+                                                    <FiHeart size={14} className={favIds.has(u.id) ? "fill-rose-500 text-rose-500" : "text-gray-300 hover:text-white"} />
                                                 </button>
                                             )}
-                                            <div className="absolute bottom-0 w-full bg-gradient-to-t from-[#16162A] to-transparent h-16" />
+                                            <div className="absolute bottom-0 w-full bg-gradient-to-t from-[#16162A] via-[#16162A]/60 to-transparent h-20" />
                                         </div>
 
-                                        <div className="p-4 flex-1 flex flex-col">
-                                            <div className="flex flex-col">
-                                                <span className="text-base font-bold text-white leading-tight">{u.name}</span>
-                                                <span className="text-[10px] text-gray-400 font-semibold tracking-wide">@{u.username || u.name.toLowerCase().replace(/\s+/g, '')}</span>
-                                            </div>
-                                            <div className="text-xs text-gray-400 mt-0.5 flex items-center justify-between">
-                                                <div className="flex items-center gap-0.5">
-                                                    <FiMapPin size={12} className="text-gray-500 shrink-0" />
-                                                    <span>{u.city || "Unknown"} · {u.age || "N/A"} yrs</span>
+                                        <div className="p-4 flex-1 flex flex-col justify-between">
+                                            <div>
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <span className="text-base font-bold text-white leading-tight truncate group-hover:text-pink-300 transition-colors">{u.name}</span>
+                                                    {u.distanceKm !== null && (
+                                                        <span className="text-[10px] font-bold text-pink-400 bg-pink-500/10 px-2 py-0.5 rounded-full border border-pink-500/25 shrink-0">
+                                                            📍 {u.distanceKm} km
+                                                        </span>
+                                                    )}
                                                 </div>
-                                                {u.distanceKm !== null && (
-                                                    <span className="text-[10px] font-bold text-pink-400 bg-pink-500/10 px-2 py-0.5 rounded-full border border-pink-500/20">
-                                                        📍 {u.distanceKm} km away
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div className="text-xs text-yellow-400 mt-1 flex items-center gap-0.5">
-                                                <FiStar size={12} className="text-yellow-400 fill-yellow-400 shrink-0" />
-                                                <span>
-                                                    {u.avg_rating > 0 ? `${u.avg_rating} ` : "New "}
-                                                    <span className="text-gray-500">
-                                                        {u.avg_rating > 0 ? `(${u.review_count} reviews)` : ""}
-                                                    </span>
+                                                <span className="text-[10px] text-gray-400 font-semibold tracking-wide block mt-0.5">
+                                                    @{u.username || u.name.toLowerCase().replace(/\s+/g, '')}
                                                 </span>
+
+                                                <div className="text-xs text-gray-400 mt-2 flex items-center justify-between">
+                                                    <div className="flex items-center gap-1">
+                                                        <FiMapPin size={12} className="text-pink-400 shrink-0" />
+                                                        <span>{u.city || "Mumbai"} · {u.age || "N/A"} yrs</span>
+                                                    </div>
+                                                    <div className="text-xs text-yellow-400 flex items-center gap-1 font-semibold">
+                                                        <FiStar size={12} className="text-yellow-400 fill-yellow-400 shrink-0" />
+                                                        <span>
+                                                            {u.avg_rating > 0 ? `${u.avg_rating}` : "New"}
+                                                            <span className="text-gray-500 text-[10px] font-normal ml-0.5">
+                                                                {u.avg_rating > 0 ? `(${u.review_count})` : ""}
+                                                            </span>
+                                                        </span>
+                                                    </div>
+                                                </div>
                                             </div>
 
-                                            <div className="mt-auto pt-4 flex items-center justify-between">
+                                            <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between">
                                                 <div>
-                                                    <span className={`text-lg font-bold ${isTargetGirl ? 'text-pink-400' : 'text-blue-400'}`}>₹{u.price || 1000}</span>
-                                                    <span className="text-xs text-gray-500">/hr</span>
+                                                    <span className="text-xs text-gray-400 block -mb-0.5">Rate</span>
+                                                    <span className={`text-base font-extrabold ${isTargetGirl ? 'text-pink-400' : 'text-blue-400'}`}>₹{u.price || 1000}</span>
+                                                    <span className="text-[11px] text-gray-500">/hr</span>
                                                 </div>
-                                                <button className={`px-3 py-1.5 text-white text-xs rounded-xl font-semibold hover:opacity-85 transition ${isTargetGirl ? 'bg-gradient-to-r from-pink-500 to-purple-500' : 'bg-gradient-to-r from-blue-500 to-indigo-500'}`}>
+                                                <button className={`px-3.5 py-1.5 text-white text-xs rounded-xl font-bold shadow-md hover:opacity-90 active:scale-95 transition-all ${
+                                                    isTargetGirl 
+                                                        ? 'bg-gradient-to-r from-pink-500 to-purple-600 shadow-pink-500/20' 
+                                                        : 'bg-gradient-to-r from-blue-500 to-indigo-600 shadow-blue-500/20'
+                                                }`}>
                                                     View Profile
                                                 </button>
                                             </div>

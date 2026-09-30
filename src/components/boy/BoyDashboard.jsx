@@ -3,21 +3,78 @@ import { PAGES } from '../../App';
 import SettingsModal from '../shared/SettingsModal';
 import SOSButton from '../shared/SOSButton';
 import InstagramPostModal from '../shared/InstagramPostModal';
-import { FiBell, FiSettings, FiLink, FiAlertTriangle, FiCheckCircle, FiClock, FiCreditCard, FiStar, FiCalendar, FiGrid, FiTrash2, FiMapPin, FiX, FiUser, FiShield, FiHeart } from "react-icons/fi";
+import InvoiceModal from '../shared/InvoiceModal';
+import ReviewModal from '../shared/ReviewModal';
+import GirlWalletTab from '../girl/GirlWalletTab';
+import KYCUploadPrompt from '../shared/KYCUploadPrompt';
+import VerifiedBadge from '../shared/VerifiedBadge';
+import ImageCropperModal from '../shared/ImageCropperModal';
+import { FiBell, FiSettings, FiLink, FiAlertTriangle, FiCheckCircle, FiClock, FiCreditCard, FiStar, FiCalendar, FiGrid, FiTrash2, FiMapPin, FiX, FiUser, FiShield, FiHeart, FiFileText, FiDollarSign, FiCamera } from "react-icons/fi";
 import imageCompression from 'browser-image-compression';
+
+// Backend API Base Configuration
+const API_BASE = process.env.REACT_APP_API_URL || "https://rentgf-and-bf.onrender.com";
+const API = `${API_BASE}/api`;
 
 function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
     const [myPosts, setMyPosts] = useState([]);
     const [expandedPost, setExpandedPost] = useState(null);
     const [showDpModal, setShowDpModal] = useState(false);
+    const [cropModalData, setCropModalData] = useState(null);
     const [kycUploading, setKycUploading] = useState(false);
     const [myBookings, setMyBookings] = useState([]);
     const [newBookingAlert, setNewBookingAlert] = useState(null);
     const [showSettings, setShowSettings] = useState(false);
     const [followStats, setFollowStats] = useState({ followers: 0, following: 0 });
 
+    const handleDpFileSelect = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            setCropModalData({
+                imageSrc: reader.result,
+                isCircular: true,
+                title: "Set Profile Picture",
+                onComplete: async ({ file: croppedFile }) => {
+                    setCropModalData(null);
+                    setShowDpModal(false);
+                    const uploadFormData = new FormData();
+                    uploadFormData.append('profile_pic', croppedFile);
+                    try {
+                        const token = localStorage.getItem('token');
+                        const response = await fetch(`${API}/upload/${user.id}`, {
+                            method: 'POST',
+                            body: uploadFormData,
+                            headers: { 'Authorization': `Bearer ${token}` }
+                        });
+                        if (response.ok) {
+                            const data = await response.json();
+                            const updated = { ...user, profile_pic: data.imageUrl };
+                            setBoyUser(updated);
+                            localStorage.setItem('user', JSON.stringify(updated));
+                            if (socket) {
+                                socket.emit('active_status_changed');
+                            }
+                            alert('Profile picture updated successfully!');
+                        } else {
+                            alert('Upload failed.');
+                        }
+                    } catch (err) {
+                        console.error(err);
+                        alert('Error uploading profile picture.');
+                    }
+                }
+            });
+        };
+        reader.readAsDataURL(file);
+        e.target.value = '';
+    };
+
     const [dashboardTab, setDashboardTab] = useState('posts'); // 'posts' | 'favorites'
     const [favoritesList, setFavoritesList] = useState([]);
+    const [invoiceModalBooking, setInvoiceModalBooking] = useState(null);
+    const [reviewModalBooking, setReviewModalBooking] = useState(null);
 
     const [activeStatModal, setActiveStatModal] = useState(null);
     const [bookingFilter, setBookingFilter] = useState('all');
@@ -27,7 +84,13 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
     });
     const [followList, setFollowList] = useState([]);
     const [followListLoading, setFollowListLoading] = useState(false);
+    const hasDocument = Boolean(user?.id_proof_url || user?.kyc_status === 'verified' || user?.kyc_status === 'pending');
 
+    useEffect(() => {
+        const handleOpenSettings = () => setShowSettings(true);
+        window.addEventListener('open-settings', handleOpenSettings);
+        return () => window.removeEventListener('open-settings', handleOpenSettings);
+    }, []);
 
     useEffect(() => {
         if (!user) return;
@@ -53,26 +116,26 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                 const token = localStorage.getItem("token");
                 const postsHeaders = {};
                 if (token) postsHeaders["Authorization"] = `Bearer ${token}`;
-                const postsRes = await fetch(`https://rentgf-and-bf.onrender.com/api/posts/${user.id}`, { headers: postsHeaders });
+                const postsRes = await fetch(`${API}/posts/${user.id}`, { headers: postsHeaders });
                 if (postsRes.ok) fetchedPosts = await postsRes.json();
 
-                const bookingsRes = await fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${user.id}`, {
+                const bookingsRes = await fetch(`${API}/bookings/${user.id}`, {
                     headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
                 });
                 if (bookingsRes.ok) fetchedBookings = await bookingsRes.json();
 
 
-                const statsRes = await fetch(`https://rentgf-and-bf.onrender.com/api/follow-stats/${user.id}`);
+                const statsRes = await fetch(`${API}/follow-stats/${user.id}`);
                 if (statsRes.ok) fetchedFollowStats = await statsRes.json();
 
-                const reviewRes = await fetch(`https://rentgf-and-bf.onrender.com/api/reviews/${user.id}`);
+                const reviewRes = await fetch(`${API}/reviews/${user.id}`);
                 if (reviewRes.ok) {
                     const data = await reviewRes.json();
                     fetchedReviews = data.reviews;
                 }
 
                 if (token) {
-                    const favsRes = await fetch("https://rentgf-and-bf.onrender.com/api/favorites", {
+                    const favsRes = await fetch(`${API}/favorites`, {
                         headers: { Authorization: `Bearer ${token}` }
                     });
                     if (favsRes.ok) {
@@ -106,8 +169,9 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
         socket.emit("join_own_room", user.id);
 
         const handleReceiveBooking = (data) => {
+            if (!hasDocument) return;
             setNewBookingAlert(data);
-            fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${user.id}`, {
+            fetch(`${API}/bookings/${user.id}`, {
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
             })
                 .then(res => res.json())
@@ -140,7 +204,7 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
             formData.append("id_document", compressedFile);
 
             const token = localStorage.getItem('token');
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/kyc/${user.id}`, {
+            const response = await fetch(`${API}/kyc/${user.id}`, {
                 method: "POST",
                 body: formData,
                 headers: { 'Authorization': `Bearer ${token}` }
@@ -161,7 +225,7 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
 
     const handleBookingStatus = async (bookingId, newStatus) => {
         try {
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${bookingId}`, {
+            const response = await fetch(`${API}/bookings/${bookingId}`, {
                 method: "PUT",
                 headers: {
                     "Content-Type": "application/json",
@@ -184,7 +248,7 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
         if (reason === null) return;
         
         try {
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${bookingId}/cancel`, {
+            const response = await fetch(`${API}/bookings/${bookingId}/cancel`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -217,7 +281,7 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
         if (!time) return;
 
         try {
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${bookingId}/reschedule`, {
+            const response = await fetch(`${API}/bookings/${bookingId}/reschedule`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -246,7 +310,7 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
 
     const handleRespondReschedule = async (bookingId, action) => {
         try {
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/bookings/${bookingId}/reschedule/respond`, {
+            const response = await fetch(`${API}/bookings/${bookingId}/reschedule/respond`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -287,7 +351,7 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
             const endpoint = type === 'followers'
                 ? `/api/followers-list/${user.id}`
                 : `/api/following-list/${user.id}`;
-            const res = await fetch(`https://rentgf-and-bf.onrender.com${endpoint}`, { headers });
+            const res = await fetch(`${API_BASE}${endpoint}`, { headers });
             if (res.ok) setFollowList(await res.json());
         } catch (e) { console.error(e); }
         setFollowListLoading(false);
@@ -297,7 +361,7 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
         if (!await window.showConfirm("Are you sure you want to delete this photo?")) return;
         try {
             const token = localStorage.getItem("token");
-            const response = await fetch(`https://rentgf-and-bf.onrender.com/api/posts/${postId}`, { 
+            const response = await fetch(`${API}/posts/${postId}`, { 
                 method: "DELETE",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -319,17 +383,19 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
         return b.status === bookingFilter;
     });
 
-    const notificationsList = pendingBookings.map(b => ({
-        id: `booking-${b.id}`,
-        type: 'booking',
-        message: `${b.girl_name || 'Someone'} requested a booking for ${b.hours} hrs.`,
-        time: b.created_at,
-        pic: b.girl_pic
-    }));
+    const notificationsList = hasDocument
+        ? pendingBookings.map(b => ({
+            id: `booking-${b.id}`,
+            type: 'booking',
+            message: `${b.girl_name || 'Someone'} requested a booking for ${b.hours} hrs.`,
+            time: b.created_at,
+            pic: b.girl_pic
+        }))
+        : [];
 
     return (
         <div className="pt-16 pb-20 min-h-[100dvh] relative bg-[#0D0D1A]">
-            {newBookingAlert && (
+            {newBookingAlert && hasDocument && (
                 <div className="fixed top-20 right-6 z-50 bg-blue-500 text-white px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 animate-bounce">
                     <FiBell size={22} />
                     <div>
@@ -358,6 +424,21 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                                     )}
                                 </div>
                             </div>
+
+                            {/* Camera Edit Badge */}
+                            <label
+                                className="absolute bottom-0 right-0 w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gradient-to-r from-blue-500 to-purple-600 text-white flex items-center justify-center cursor-pointer shadow-lg border-2 border-[#0D0D1A] hover:scale-110 active:scale-95 transition z-10"
+                                title="Change or adjust profile picture"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <FiCamera size={13} />
+                                <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={handleDpFileSelect}
+                                />
+                            </label>
                         </div>
 
                         {/* Stats columns */}
@@ -388,9 +469,7 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                         <div className="flex items-center gap-2 mb-1.5">
                             <h1 className="text-base sm:text-lg font-bold text-white">{user.name}</h1>
                             {user.kyc_status === 'verified' && (
-                                <span className="flex items-center gap-1 text-[9px] bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded-full font-bold border border-blue-500/20">
-                                    <FiShield size={9} /> Verified
-                                </span>
+                                <VerifiedBadge size="sm" />
                             )}
                         </div>
                         {user.bio && <p className="text-gray-300 text-sm leading-relaxed mb-1">{user.bio}</p>}
@@ -398,20 +477,33 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                             <a
                                 href={user.social_link.startsWith('http') ? user.social_link : `https://${user.social_link}`}
                                 target="_blank" rel="noreferrer"
-                                className="text-blue-400 text-xs hover:underline flex items-center gap-1 w-fit mt-1.5"
+                                className="text-pink-400 text-xs hover:underline flex items-center gap-1 w-fit mt-1.5"
                             >
                                 <FiLink size={12} /> {user.social_link}
                             </a>
                         )}
                     </div>
 
-                    {/* Full-width action button for Edit Profile */}
-                    <div className="w-full flex gap-3">
+                    {/* Instagram-Style Profile Action Buttons */}
+                    <div className="w-full flex gap-2">
                         <button
                             onClick={() => setShowSettings(true)}
-                            className="flex-1 py-2 bg-white/10 border border-white/20 text-white rounded-xl text-xs font-bold hover:bg-white/20 transition flex items-center justify-center gap-1.5"
+                            className="flex-1 py-1.5 bg-[#262626] hover:bg-[#363636] text-white rounded-lg text-xs font-semibold transition active:scale-95 flex items-center justify-center gap-1.5"
                         >
-                            <FiSettings size={13} /> Edit Profile
+                            <FiSettings size={13} /> Edit profile
+                        </button>
+                        <button
+                            onClick={() => {
+                                if (navigator.share) {
+                                    navigator.share({ title: user.name, url: window.location.href }).catch(() => {});
+                                } else {
+                                    navigator.clipboard.writeText(window.location.href);
+                                    alert("Profile link copied! 📋");
+                                }
+                            }}
+                            className="flex-1 py-1.5 bg-[#262626] hover:bg-[#363636] text-white rounded-lg text-xs font-semibold transition active:scale-95 flex items-center justify-center gap-1.5"
+                        >
+                            Share profile
                         </button>
                     </div>
                 </div>
@@ -470,11 +562,7 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                     )}
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-7">
-                    <div className="bg-[#16162A] border border-white/5 rounded-2xl p-4 cursor-pointer hover:bg-white/5 transition group" onClick={() => setActiveStatModal('earnings')}>
-                        <div className="flex items-center gap-1.5 text-[11px] text-gray-400 mb-2"><FiCreditCard size={12} className="text-blue-400" /> Earnings</div>
-                        <div className="text-xl font-bold text-blue-400">₹{totalEarnings}</div>
-                    </div>
+                <div className={`grid ${hasDocument ? 'grid-cols-3' : 'grid-cols-2'} gap-3 mb-7`}>
                     <div className="bg-[#16162A] border border-white/5 rounded-2xl p-4 cursor-pointer hover:bg-white/5 transition group" onClick={() => setActiveStatModal('rating')}>
                         <div className="flex items-center gap-1.5 text-[11px] text-gray-400 mb-2"><FiStar size={12} className="text-yellow-400" /> Rating</div>
                         <div className="text-xl font-bold text-yellow-400">
@@ -484,28 +572,30 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                             }
                         </div>
                     </div>
-                    <div className="bg-[#16162A] border border-white/5 rounded-2xl p-4 cursor-pointer hover:bg-white/5 transition relative group" onClick={() => setActiveStatModal('my_bookings')}>
-                        <div className="flex items-center gap-1.5 text-[11px] text-gray-400 mb-2"><FiCalendar size={12} className="text-green-400" /> Bookings</div>
-                        <div className="text-xl font-bold text-green-400">{completedBookings.length}</div>
-                        {pendingBookings.length > 0 && (
-                            <span className="absolute top-2 right-2 flex h-3 w-3">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
-                            </span>
-                        )}
-                    </div>
+                    {hasDocument && (
+                        <div className="bg-[#16162A] border border-white/5 rounded-2xl p-4 cursor-pointer hover:bg-white/5 transition relative group" onClick={() => setActiveStatModal('my_bookings')}>
+                            <div className="flex items-center gap-1.5 text-[11px] text-gray-400 mb-2"><FiCalendar size={12} className="text-green-400" /> Bookings</div>
+                            <div className="text-xl font-bold text-green-400">{completedBookings.length}</div>
+                            {pendingBookings.length > 0 && (
+                                <span className="absolute top-2 right-2 flex h-3 w-3">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                                    <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+                                </span>
+                            )}
+                        </div>
+                    )}
                     <div className="bg-[#16162A] border border-white/5 rounded-2xl p-4 cursor-pointer hover:bg-white/5 transition group" onClick={() => setActiveStatModal('notifications')}>
                         <div className="flex items-center gap-1.5 text-[11px] text-gray-400 mb-2"><FiBell size={12} className="text-purple-400" /> Alerts</div>
                         <div className="text-xl font-bold text-purple-400">{notificationsList.length}</div>
                     </div>
                 </div>
 
-                {/* ── Tabs Header (Posts vs Saved Favorites) ── */}
+                {/* ── Tabs Header (Posts vs Saved Favorites vs Wallet) ── */}
                 <div className="mb-6 border-t border-white/5 pt-3">
-                    <div className="flex justify-center sm:justify-start gap-2 border-b border-white/10 mb-4">
+                    <div className="flex justify-center sm:justify-start gap-2 border-b border-white/10 mb-4 overflow-x-auto">
                         <button
                             onClick={() => setDashboardTab('posts')}
-                            className={`flex items-center gap-2 py-3 px-6 text-xs font-bold border-b-2 transition ${
+                            className={`flex items-center gap-2 py-3 px-5 text-xs font-bold border-b-2 transition whitespace-nowrap ${
                                 dashboardTab === 'posts'
                                     ? 'border-blue-500 text-blue-400'
                                     : 'border-transparent text-gray-400 hover:text-white'
@@ -513,9 +603,21 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                         >
                             <FiGrid size={15} /> Posts ({myPosts.length})
                         </button>
+                        {hasDocument && (
+                            <button
+                                onClick={() => setDashboardTab('wallet')}
+                                className={`flex items-center gap-2 py-3 px-5 text-xs font-bold border-b-2 transition whitespace-nowrap ${
+                                    dashboardTab === 'wallet'
+                                        ? 'border-emerald-500 text-emerald-400'
+                                        : 'border-transparent text-gray-400 hover:text-white'
+                                }`}
+                            >
+                                <FiDollarSign size={15} /> Earnings & Wallet 💰
+                            </button>
+                        )}
                         <button
                             onClick={() => setDashboardTab('favorites')}
-                            className={`flex items-center gap-2 py-3 px-6 text-xs font-bold border-b-2 transition ${
+                            className={`flex items-center gap-2 py-3 px-5 text-xs font-bold border-b-2 transition whitespace-nowrap ${
                                 dashboardTab === 'favorites'
                                     ? 'border-pink-500 text-pink-400'
                                     : 'border-transparent text-gray-400 hover:text-white'
@@ -524,6 +626,17 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                             <FiHeart size={15} className={dashboardTab === 'favorites' ? "fill-pink-500 text-pink-500" : ""} /> Saved Favorites ({favoritesList.length})
                         </button>
                     </div>
+
+                    {/* Wallet View */}
+                    {dashboardTab === 'wallet' && (
+                        hasDocument ? (
+                            <GirlWalletTab user={user} />
+                        ) : (
+                            <div className="py-6 max-w-lg mx-auto">
+                                <KYCUploadPrompt user={user} onUploadSuccess={(updated) => setBoyUser(updated)} />
+                            </div>
+                        )
+                    )}
 
                     {/* Posts View */}
                     {dashboardTab === 'posts' && (
@@ -571,7 +684,7 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                                             <div className="flex-1 min-w-0">
                                                 <div className="text-sm font-bold text-white truncate flex items-center gap-1.5">
                                                     <span>{fav.name}</span>
-                                                    {fav.kyc_status === 'verified' && <span className="text-blue-400 text-xs">✔</span>}
+                                                    {fav.kyc_status === 'verified' && <VerifiedBadge size="xs" />}
                                                 </div>
                                                 <div className="text-[11px] text-gray-400 truncate">@{fav.username || fav.name.toLowerCase().replace(/\s+/g, '')}</div>
                                                 <div className="text-[11px] text-gray-500 flex items-center gap-1 mt-0.5">
@@ -643,10 +756,22 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                             />
                         </div>
                         
-                        {/* Label */}
-                        <div className="mt-4 text-center">
-                            <span className="text-white font-bold text-sm">{user.name}</span>
-                            <span className="text-gray-400 text-xs block mt-0.5">Profile Picture</span>
+                        {/* Label & Change Button */}
+                        <div className="mt-4 text-center flex flex-col items-center gap-2">
+                            <div>
+                                <span className="text-white font-bold text-sm">{user.name}</span>
+                                <span className="text-gray-400 text-xs block mt-0.5">Profile Picture</span>
+                            </div>
+                            <label className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white text-xs font-bold shadow-lg shadow-blue-500/30 cursor-pointer transition active:scale-95">
+                                <FiCamera size={14} />
+                                <span>Change / Adjust Photo</span>
+                                <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={handleDpFileSelect}
+                                />
+                            </label>
                         </div>
                     </div>
                 </div>
@@ -681,6 +806,14 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                         <div className="overflow-y-auto p-5 space-y-4 custom-scrollbar">
 
                             {activeStatModal === 'my_bookings' && (
+                                !hasDocument ? (
+                                    <div className="py-8 text-center flex flex-col items-center gap-3">
+                                        <FiShield size={36} className="text-blue-400" />
+                                        <div className="font-bold text-white text-sm">ID Verification Required</div>
+                                        <p className="text-xs text-gray-400 max-w-xs">Date Bookings & Companion requests access karne ke liye apna Govt ID document upload karein.</p>
+                                        <button onClick={() => { setActiveStatModal(null); setShowSettings(true); }} className="px-5 py-2 rounded-xl text-xs font-bold bg-blue-500 text-white">Upload Document</button>
+                                    </div>
+                                ) : (
                                 <>
                                     <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar shrink-0 sticky top-0 bg-[#16162A] z-10 -mt-2 pt-2">
                                         {['all', 'pending', 'accepted', 'completed', 'canceled'].map(filter => (
@@ -774,14 +907,33 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                                                                 </button>
                                                             </>
                                                         )}
-                                                        {booking.status === 'completed' && <span className="text-green-400 text-xs font-bold border border-green-400/20 px-3 py-1.5 rounded-lg bg-green-400/10 flex items-center gap-1"><FiCheckCircle size={12} /> Completed</span>}
+                                                        {booking.status === 'completed' && (
+                                                            <div className="flex items-center gap-2 flex-wrap justify-end">
+                                                                <button
+                                                                    onClick={() => setReviewModalBooking(booking)}
+                                                                    className="px-3 py-1.5 bg-gradient-to-r from-amber-500/20 to-pink-500/20 hover:from-amber-500/30 hover:to-pink-500/30 text-amber-300 rounded-lg text-xs font-bold border border-amber-500/30 transition flex items-center gap-1.5 shadow-sm"
+                                                                >
+                                                                    <FiStar size={13} className="fill-amber-400 text-amber-400" /> Rate / Review ⭐
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => setInvoiceModalBooking(booking)}
+                                                                    className="px-3 py-1.5 bg-white/5 hover:bg-white/10 text-gray-300 rounded-lg text-xs font-bold border border-white/10 transition flex items-center gap-1.5"
+                                                                >
+                                                                    <FiFileText size={13} className="text-pink-400" /> Invoice 📄
+                                                                </button>
+                                                                <span className="text-green-400 text-xs font-bold border border-green-400/20 px-3 py-1.5 rounded-lg bg-green-400/10 flex items-center gap-1">
+                                                                    <FiCheckCircle size={12} /> Completed
+                                                                </span>
+                                                            </div>
+                                                        )}
                                                         {booking.status === 'rejected' && <span className="text-red-400 text-xs font-bold border border-red-400/20 px-3 py-1.5 rounded-lg bg-red-400/10 flex items-center gap-1"><FiX size={12} /> Canceled</span>}
                                                     </div>
                                                 </div>
                                             ))}
                                         </div>
                                     )}
-                                </>
+                                    </>
+                                )
                             )}
 
                             {activeStatModal === 'earnings' && (
@@ -862,6 +1014,42 @@ function BoyDashboard({ user, setBoyUser, setPage, setSelectedGirl, socket }) {
                 </div>
             )}
             <SOSButton user={user} socket={socket} />
+
+            {/* Printable Digital Invoice Receipt Modal */}
+            <InvoiceModal
+                isOpen={!!invoiceModalBooking}
+                onClose={() => setInvoiceModalBooking(null)}
+                booking={invoiceModalBooking}
+                clientName={user?.name}
+                companionName={invoiceModalBooking?.girl_name}
+            />
+
+            {/* Leave Review Modal */}
+            {reviewModalBooking && (
+                <ReviewModal
+                    isOpen={!!reviewModalBooking}
+                    onClose={() => setReviewModalBooking(null)}
+                    companion={{
+                        id: reviewModalBooking.girl_id,
+                        name: reviewModalBooking.girl_name,
+                        profile_pic: reviewModalBooking.girl_pic
+                    }}
+                    bookingId={reviewModalBooking.id}
+                    onReviewSubmitted={() => {
+                        alert("🎉 Thank you! Your verified review and rating have been posted.");
+                    }}
+                />
+            )}
+
+            {cropModalData && (
+                <ImageCropperModal
+                    imageSrc={cropModalData.imageSrc}
+                    isCircular={cropModalData.isCircular}
+                    title={cropModalData.title}
+                    onCropComplete={cropModalData.onComplete}
+                    onClose={() => setCropModalData(null)}
+                />
+            )}
         </div>
     );
 }

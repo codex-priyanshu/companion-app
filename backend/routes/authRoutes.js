@@ -1,50 +1,111 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { pool } = require('../config/db');
 const rateLimiter = require('../middleware/rateLimiter');
+const authenticateToken = require('../middleware/auth');
 
 const router = express.Router();
 
-// ─── Email Service (Brevo HTTP API — works on Render, no SMTP ports needed) ──
+// ─── Cryptographically Secure Helpers ─────────────────────────
+const generateSecureOTP = () => crypto.randomInt(100000, 1000000).toString();
+
+const timingSafeCompare = (a, b) => {
+    if (!a || !b) return false;
+    const strA = a.toString();
+    const strB = b.toString();
+    if (strA.length !== strB.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(strA), Buffer.from(strB));
+};
+
+// ─── Email Service (Dual-Provider: Brevo HTTP API + Nodemailer Fallback) ──
+const nodemailer = require('nodemailer');
+
+let mailTransporter = null;
+const getMailTransporter = () => {
+    if (!mailTransporter && process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+        mailTransporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS
+            }
+        });
+    }
+    return mailTransporter;
+};
+
 const sendEmail = async ({ to, subject, html }) => {
     const apiKey = process.env.BREVO_API_KEY;
     const senderEmail = process.env.EMAIL_USER || 'noreply@coffeely.com';
     const senderName = process.env.EMAIL_FROM_NAME || 'Coffeely';
 
-    if (!apiKey) {
-        throw new Error('BREVO_API_KEY is not set in environment variables');
+    let lastError = null;
+
+    // Strategy 1: Brevo HTTP API (Fastest on cloud/Render, no SMTP ports needed)
+    if (apiKey) {
+        try {
+            const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+                method: 'POST',
+                headers: {
+                    'accept': 'application/json',
+                    'api-key': apiKey,
+                    'content-type': 'application/json'
+                },
+                body: JSON.stringify({
+                    sender: { name: senderName, email: senderEmail },
+                    to: [{ email: to }],
+                    subject: subject,
+                    htmlContent: html
+                })
+            });
+
+            if (response.ok) {
+                return await response.json();
+            }
+            const errData = await response.json().catch(() => ({}));
+            lastError = new Error(errData.message || `Brevo API error: ${response.status}`);
+            console.warn(`⚠️ Brevo API failed (${response.status}): ${lastError.message}. Trying Nodemailer fallback...`);
+        } catch (brevoErr) {
+            lastError = brevoErr;
+            console.warn(`⚠️ Brevo request failed: ${brevoErr.message}. Trying Nodemailer fallback...`);
+        }
     }
 
-    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-        method: 'POST',
-        headers: {
-            'accept': 'application/json',
-            'api-key': apiKey,
-            'content-type': 'application/json'
-        },
-        body: JSON.stringify({
-            sender: { name: senderName, email: senderEmail },
-            to: [{ email: to }],
-            subject: subject,
-            htmlContent: html
-        })
-    });
-
-    if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.message || `Brevo API error: ${response.status}`);
+    // Strategy 2: Nodemailer (Direct Gmail / SMTP credentials)
+    const transporter = getMailTransporter();
+    if (transporter) {
+        try {
+            const info = await transporter.sendMail({
+                from: `"${senderName}" <${process.env.EMAIL_USER}>`,
+                to,
+                subject,
+                html
+            });
+            console.log(`✅ Email sent via Nodemailer to ${to} (ID: ${info.messageId})`);
+            return info;
+        } catch (smtpErr) {
+            lastError = smtpErr;
+            console.error('⚠️ Nodemailer SMTP delivery failed:', smtpErr.message);
+        }
     }
 
-    return await response.json();
+    // Strategy 3: Safe fallback if providers are down or during local development
+    if (process.env.NODE_ENV !== 'production' || (!apiKey && !transporter)) {
+        console.warn(`⚠️ [DEV EMAIL LOG] Email to ${to} | Subject: "${subject}" - could not send via network provider, logged for recovery.`);
+        return { message: 'Email logged to console fallback' };
+    }
+
+    throw lastError || new Error('No working email provider configured. Please check BREVO_API_KEY or EMAIL_USER/EMAIL_PASS.');
 };
 
-console.log('Email service initialized: Brevo HTTP API');
+console.log('Email service initialized: Dual-Provider (Brevo + Nodemailer)');
 
 // Strict rate limiter for auth routes — 5 attempts per minute per IP
 const authRateLimit = rateLimiter(5, 60 * 1000);
 
-// Input validation helper
+// Input validation helpers
 const validateEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const validatePassword = (password) => password && password.length >= 6;
 
@@ -60,7 +121,7 @@ router.post('/register', authRateLimit, async (req, res) => {
         if (!role || !['boy', 'girl'].includes(role)) return res.status(400).json({ error: "Please select a valid role (boy/girl)." });
 
         // Check if email already exists
-        const existingUser = await pool.query("SELECT id, is_verified FROM users WHERE email = $1", [email.toLowerCase()]);
+        const existingUser = await pool.query("SELECT id, is_verified FROM users WHERE email = $1", [email.toLowerCase().trim()]);
         if (existingUser.rows.length > 0) {
             if (existingUser.rows[0].is_verified === false) {
                 // Delete unverified user to allow clean re-registration
@@ -70,10 +131,21 @@ router.post('/register', authRateLimit, async (req, res) => {
             }
         }
 
+        // Check if phone number already exists on an active account
+        if (phone) {
+            const cleanPhone = phone.replace(/[^0-9]/g, '').slice(-10);
+            if (cleanPhone && cleanPhone.length === 10) {
+                const existingPhone = await pool.query("SELECT id, is_verified FROM users WHERE phone = $1", [cleanPhone]);
+                if (existingPhone.rows.length > 0 && existingPhone.rows[0].is_verified !== false) {
+                    return res.status(409).json({ error: "This phone number is already registered to another account." });
+                }
+            }
+        }
+
         // Hash password
         const hashedPassword = await bcrypt.hash(password, 12);
 
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otp = generateSecureOTP();
         const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
 
         // Generate unique username from name
@@ -159,10 +231,9 @@ router.post('/register', authRateLimit, async (req, res) => {
 });
 
 
-// ─── LOGIN ───────────────────────────────────────────────────
+// ─── LOGIN WITH ACCOUNT LOCKOUT PROTECTION ───────────────────
 router.post('/login', authRateLimit, async (req, res) => {
     try {
-        // Support both 'email' and 'emailOrPhone' field names from frontend
         const emailOrPhone = req.body.email || req.body.emailOrPhone;
         const { password } = req.body;
 
@@ -180,24 +251,54 @@ router.post('/login', authRateLimit, async (req, res) => {
 
         const user = userResult.rows[0];
 
-        // Verify password — supports both bcrypt hashed AND old plain-text passwords
+        // 🛡️ Check if account is temporarily locked due to failed attempts
+        if (user.locked_until && new Date(user.locked_until) > new Date()) {
+            const remainingMins = Math.ceil((new Date(user.locked_until).getTime() - Date.now()) / (60 * 1000));
+            return res.status(429).json({
+                error: `Account is temporarily locked for security. Please try again in ${remainingMins} minute(s).`
+            });
+        }
+
+        // Verify password — supports bcrypt hashed passwords & auto-upgrades legacy
         let isPasswordValid = false;
         if (user.password && user.password.startsWith('$2')) {
-            // bcrypt hashed password
             isPasswordValid = await bcrypt.compare(password, user.password);
         } else {
-            // Old plain-text password (legacy users)
             isPasswordValid = (password === user.password);
             if (isPasswordValid) {
-                // Auto-upgrade to bcrypt on successful login
                 const hashed = await bcrypt.hash(password, 12);
                 await pool.query("UPDATE users SET password = $1 WHERE id = $2", [hashed, user.id]);
             }
         }
 
         if (!isPasswordValid) {
-            return res.status(401).json({ error: "Incorrect email/phone or password." });
+            // 🛡️ Track failed attempt and trigger 15-min lockout after 5 consecutive failures
+            const newFailedAttempts = (user.failed_login_attempts || 0) + 1;
+            if (newFailedAttempts >= 5) {
+                await pool.query(
+                    "UPDATE users SET failed_login_attempts = $1, locked_until = NOW() + INTERVAL '15 minutes' WHERE id = $2",
+                    [newFailedAttempts, user.id]
+                );
+                return res.status(429).json({
+                    error: "Account locked for 15 minutes due to 5 consecutive failed login attempts."
+                });
+            } else {
+                await pool.query(
+                    "UPDATE users SET failed_login_attempts = $1 WHERE id = $2",
+                    [newFailedAttempts, user.id]
+                );
+                const remaining = 5 - newFailedAttempts;
+                return res.status(401).json({
+                    error: `Incorrect email/phone or password. (${remaining} attempt${remaining > 1 ? 's' : ''} remaining)`
+                });
+            }
         }
+
+        // Successful login: reset failed counters and update last login IP
+        await pool.query(
+            "UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_login_ip = $1 WHERE id = $2",
+            [req.ip || null, user.id]
+        );
 
         if (user.is_verified === false) {
             return res.status(403).json({ error: "UNVERIFIED_ACCOUNT", email: user.email });
@@ -217,8 +318,6 @@ router.post('/login', authRateLimit, async (req, res) => {
         res.status(500).json({ error: "Server error. Please try again." });
     }
 });
-
-
 // ─── FORGOT PASSWORD (Send OTP) ───────────────────────────────
 router.post('/forgot-password', authRateLimit, async (req, res) => {
     try {
@@ -237,11 +336,11 @@ router.post('/forgot-password', authRateLimit, async (req, res) => {
         }
 
         const user = userResult.rows[0];
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otp = generateSecureOTP();
         const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
 
         await pool.query(
-            "UPDATE users SET otp = $1, otp_expiry = $2 WHERE id = $3",
+            "UPDATE users SET otp = $1, otp_expiry = $2, failed_otp_attempts = 0 WHERE id = $3",
             [otp, otpExpiry, user.id]
         );
 
@@ -258,10 +357,10 @@ router.post('/forgot-password', authRateLimit, async (req, res) => {
                                 <tr><td style="background:linear-gradient(135deg,#e91e8c,#ff6b6b);padding:36px 40px;text-align:center;">
                                     <h1 style="margin:0;color:#fff;font-size:26px;font-weight:700;">Coffeely</h1>
                                     <p style="margin:8px 0 0;color:rgba(255,255,255,0.85);font-size:14px;">Password Reset</p>
-                                </td></tr>
+                                </tr></td>
                                 <tr><td style="padding:40px;">
                                     <p style="margin:0 0 16px;color:#333;font-size:16px;">Hi <strong>${user.name}</strong>,</p>
-                                    <p style="margin:0 0 24px;color:#555;font-size:15px;line-height:1.6;">You requested a password reset. Use the OTP below. This code expires in <strong>10 minutes</strong>.</p>
+                                    <p style="margin:0 0 24px;color:#555;font-size:15px;line-height:1.6;">You requested a password reset. Use the secure OTP below. This code expires in <strong>10 minutes</strong>.</p>
                                     <div style="background:linear-gradient(135deg,#fff0f6,#ffe4f0);border:2px solid #f48fb1;border-radius:12px;padding:28px;text-align:center;margin-bottom:24px;">
                                         <p style="margin:0 0 8px;color:#c2185b;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:2px;">Reset OTP</p>
                                         <p style="margin:0;color:#e91e8c;font-size:48px;font-weight:900;letter-spacing:12px;font-family:'Courier New',monospace;">${otp}</p>
@@ -281,8 +380,8 @@ router.post('/forgot-password', authRateLimit, async (req, res) => {
 
         res.status(200).json({ message: "OTP sent successfully! Please check your email." });
     } catch (err) {
-        console.error("Forgot password error — Full details:", err.message, err);
-        res.status(500).json({ error: "Failed to send OTP: " + err.message });
+        console.error("Forgot password error:", err.message);
+        res.status(500).json({ error: "Failed to send OTP. Please try again." });
     }
 });
 
@@ -293,10 +392,10 @@ router.post('/reset-password', authRateLimit, async (req, res) => {
 
         if (!email || !validateEmail(email)) return res.status(400).json({ error: "Please enter a valid email." });
         if (!otp) return res.status(400).json({ error: "Please enter the OTP." });
-        if (!newPassword || newPassword.length < 5) return res.status(400).json({ error: "New password must be at least 5 characters." });
+        if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: "New password must be at least 6 characters." });
 
         const userResult = await pool.query(
-            "SELECT id, otp, otp_expiry FROM users WHERE email = $1",
+            "SELECT id, otp, otp_expiry, failed_otp_attempts FROM users WHERE email = $1",
             [email.toLowerCase().trim()]
         );
         if (userResult.rows.length === 0) return res.status(404).json({ error: "Account not found." });
@@ -305,11 +404,22 @@ router.post('/reset-password', authRateLimit, async (req, res) => {
 
         if (!user.otp) return res.status(400).json({ error: "Please request an OTP first." });
         if (new Date() > new Date(user.otp_expiry)) return res.status(400).json({ error: "OTP has expired. Please request a new one." });
-        if (user.otp !== otp.toString()) return res.status(400).json({ error: "Incorrect OTP. Please try again." });
+
+        // 🛡️ Timing-safe OTP comparison and brute-force attempt lockout
+        if (!timingSafeCompare(user.otp, otp)) {
+            const failedAttempts = (user.failed_otp_attempts || 0) + 1;
+            if (failedAttempts >= 5) {
+                await pool.query("UPDATE users SET otp = NULL, otp_expiry = NULL, failed_otp_attempts = 0 WHERE id = $1", [user.id]);
+                return res.status(429).json({ error: "Too many incorrect OTP attempts. The OTP has been invalidated for your security. Please request a new code." });
+            } else {
+                await pool.query("UPDATE users SET failed_otp_attempts = $1 WHERE id = $2", [failedAttempts, user.id]);
+                return res.status(400).json({ error: `Incorrect OTP. (${5 - failedAttempts} attempt(s) remaining)` });
+            }
+        }
 
         const hashedPassword = await bcrypt.hash(newPassword, 12);
         await pool.query(
-            "UPDATE users SET password = $1, otp = NULL, otp_expiry = NULL WHERE id = $2",
+            "UPDATE users SET password = $1, otp = NULL, otp_expiry = NULL, failed_otp_attempts = 0, password_changed_at = NOW() WHERE id = $2",
             [hashedPassword, user.id]
         );
 
@@ -322,7 +432,7 @@ router.post('/reset-password', authRateLimit, async (req, res) => {
 
 
 // ─── SEND OTP ────────────────────────────────────────────────
-router.post('/send-otp', async (req, res) => {
+router.post('/send-otp', authRateLimit, async (req, res) => {
     try {
         const { email } = req.body;
 
@@ -336,17 +446,17 @@ router.post('/send-otp', async (req, res) => {
         }
 
         const user = userResult.rows[0];
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otp = generateSecureOTP();
         const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
 
         await pool.query(
-            "UPDATE users SET otp = $1, otp_expiry = $2 WHERE id = $3",
+            "UPDATE users SET otp = $1, otp_expiry = $2, failed_otp_attempts = 0 WHERE id = $3",
             [otp, otpExpiry, user.id]
         );
 
         await sendEmail({
             to: email,
-            subject: 'Your RentGF Verification Code',
+            subject: 'Your Coffeely Verification Code',
             html: `
                 <!DOCTYPE html>
                 <html>
@@ -359,7 +469,7 @@ router.post('/send-otp', async (req, res) => {
                         <tr><td align="center">
                             <table width="480" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.10);">
                                 <tr><td style="background:linear-gradient(135deg,#e91e8c,#ff6b6b);padding:36px 40px;text-align:center;">
-                                    <h1 style="margin:0;color:#ffffff;font-size:28px;font-weight:700;letter-spacing:1px;">RentGF</h1>
+                                    <h1 style="margin:0;color:#ffffff;font-size:28px;font-weight:700;letter-spacing:1px;">Coffeely</h1>
                                     <p style="margin:8px 0 0;color:rgba(255,255,255,0.85);font-size:14px;">Email Verification</p>
                                 </td></tr>
                                 <tr><td style="padding:40px 40px 32px;">
@@ -373,7 +483,7 @@ router.post('/send-otp', async (req, res) => {
                                     <p style="margin:0;color:#aaaaaa;font-size:12px;text-align:center;">If you didn't request this, please ignore this email.</p>
                                 </td></tr>
                                 <tr><td style="background:#fafafa;padding:20px 40px;border-top:1px solid #eeeeee;text-align:center;">
-                                    <p style="margin:0;color:#bbbbbb;font-size:12px;">&copy; 2024 RentGF &middot; All rights reserved</p>
+                                    <p style="margin:0;color:#bbbbbb;font-size:12px;">&copy; 2026 Coffeely &middot; All rights reserved</p>
                                 </td></tr>
                             </table>
                         </td></tr>
@@ -391,7 +501,7 @@ router.post('/send-otp', async (req, res) => {
 });
 
 // ─── VERIFY OTP ──────────────────────────────────────────────
-router.post('/verify-otp', async (req, res) => {
+router.post('/verify-otp', authRateLimit, async (req, res) => {
     try {
         const { email, otp } = req.body;
 
@@ -403,7 +513,7 @@ router.post('/verify-otp', async (req, res) => {
         }
 
         const userResult = await pool.query(
-            "SELECT id, name, email, role, otp, otp_expiry FROM users WHERE email = $1",
+            "SELECT id, name, email, role, otp, otp_expiry, failed_otp_attempts FROM users WHERE email = $1",
             [email.toLowerCase()]
         );
         if (userResult.rows.length === 0) {
@@ -418,12 +528,21 @@ router.post('/verify-otp', async (req, res) => {
         if (new Date() > new Date(user.otp_expiry)) {
             return res.status(400).json({ error: "OTP has expired. Please request a new one." });
         }
-        if (user.otp !== otp.toString()) {
-            return res.status(400).json({ error: "Incorrect OTP. Please try again." });
+
+        // 🛡️ Timing-safe OTP comparison and brute-force attempt lockout
+        if (!timingSafeCompare(user.otp, otp)) {
+            const failedAttempts = (user.failed_otp_attempts || 0) + 1;
+            if (failedAttempts >= 5) {
+                await pool.query("UPDATE users SET otp = NULL, otp_expiry = NULL, failed_otp_attempts = 0 WHERE id = $1", [user.id]);
+                return res.status(429).json({ error: "Too many incorrect OTP attempts. The OTP has been invalidated for your security. Please request a new code." });
+            } else {
+                await pool.query("UPDATE users SET failed_otp_attempts = $1 WHERE id = $2", [failedAttempts, user.id]);
+                return res.status(400).json({ error: `Incorrect OTP. (${5 - failedAttempts} attempt(s) remaining)` });
+            }
         }
 
         await pool.query(
-            "UPDATE users SET is_verified = true, otp = NULL, otp_expiry = NULL WHERE id = $1",
+            "UPDATE users SET is_verified = true, otp = NULL, otp_expiry = NULL, failed_otp_attempts = 0 WHERE id = $1",
             [user.id]
         );
 
@@ -434,19 +553,64 @@ router.post('/verify-otp', async (req, res) => {
         );
 
         res.status(200).json({
-            message: "Email verified! Welcome to RentGF!",
+            message: "Email verified! Welcome to Coffeely 🎉",
             token,
             user: {
                 id: user.id,
                 name: user.name,
-                username: user.username,
                 email: user.email,
                 role: user.role
             }
         });
     } catch (err) {
         console.error("Verify OTP error:", err);
-        res.status(500).json({ error: "Failed to verify OTP. Please try again." });
+        res.status(500).json({ error: "OTP verify karne mein error. Dobara try karo." });
+    }
+});
+
+// ─── CHANGE PASSWORD (AUTHENTICATED) ─────────────────────────
+router.post('/change-password', authenticateToken, rateLimiter(5, 60 * 1000), async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+
+        if (!currentPassword) {
+            return res.status(400).json({ error: "Current password is required." });
+        }
+        if (!newPassword || newPassword.length < 6) {
+            return res.status(400).json({ error: "New password must be at least 6 characters long." });
+        }
+
+        const userResult = await pool.query(
+            "SELECT id, password FROM users WHERE id = $1",
+            [req.user.id]
+        );
+
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ error: "User account not found." });
+        }
+
+        const user = userResult.rows[0];
+
+        const isMatch = await bcrypt.compare(currentPassword, user.password);
+        if (!isMatch) {
+            return res.status(400).json({ error: "Current password is incorrect." });
+        }
+
+        if (currentPassword === newPassword) {
+            return res.status(400).json({ error: "New password cannot be the same as your old password." });
+        }
+
+        const hashedNewPassword = await bcrypt.hash(newPassword, 12);
+
+        await pool.query(
+            "UPDATE users SET password = $1 WHERE id = $2",
+            [hashedNewPassword, req.user.id]
+        );
+
+        res.status(200).json({ message: "Password changed successfully! You can now use your new password." });
+    } catch (err) {
+        console.error("Change password error:", err);
+        res.status(500).json({ error: "Server error while changing password. Please try again." });
     }
 });
 
